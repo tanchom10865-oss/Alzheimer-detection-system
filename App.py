@@ -1,62 +1,100 @@
 import streamlit as st
 
-st.title("🧠 Alzheimer’s Detection System")
+st.title("🧠 Cognitive Screening Test (Prototype)")
 
-st.write("My Streamlit app is working!")
+# -----------------------------
+# 1. WORD MEMORY (ENCODING)
+# -----------------------------
+st.subheader("1. Memorize these words")
 
-# --- IMAGE SECTION ---
-st.subheader("1. Look at this image")
+words = ["face", "velvet", "church", "daisy", "red"]
+st.write("Remember these words:")
+st.write(words)
 
-st.image("image1.jpg", caption="Study Image", use_container_width=True)
+st.session_state["words"] = words
 
-# --- QUESTIONS ---
-st.subheader("2. Answer the questions")
+st.write("---")
 
-q1 = st.radio(
-    "What did you see in the image?",
-    ["People", "Animals", "Objects", "I don't remember"]
-)
+# -----------------------------
+# 2. ATTENTION TEST
+# -----------------------------
+st.subheader("2. Attention Test")
 
-q2 = st.radio(
-    "How clear was your memory of the image?",
-    ["Very clear", "Somewhat clear", "Unclear", "Not sure"]
-)
+forward = st.text_input("Repeat numbers FORWARD: 2 1 8 5 4")
+backward = st.text_input("Repeat numbers BACKWARD: 7 4 2")
 
-q3 = st.text_input("Describe the image in your own words:")
+st.write("---")
 
-# --- SIMPLE AI LOGIC ---
-score = 0
+# -----------------------------
+# 3. LANGUAGE TEST
+# -----------------------------
+st.subheader("3. Language Repetition")
 
-if q1 == "I don't remember":
-    score += 2
-if q2 in ["Unclear", "Not sure"]:
-    score += 2
-if len(q3) < 10:
-    score += 1
+lang1 = st.text_input("Repeat: I only know that John is the one to help today")
+lang2 = st.text_input("Repeat: The cat always hides under the couch when dogs are in the room")
 
-# --- RESULT ---
-if st.button("Analyze"):
-    if score >= 4:
-        st.error("⚠️ High risk: Cognitive decline indicators detected")
-    elif score == 2 or score == 3:
-        st.warning("🟡 Moderate risk: Some memory issues detected")
+st.write("---")
+
+# -----------------------------
+# 4. ABSTRACTION TEST
+# -----------------------------
+st.subheader("4. Abstraction")
+
+t1 = st.text_input("What is similar between: train and bicycle?")
+t2 = st.text_input("What is similar between: watch and ruler?")
+
+st.write("---")
+
+# -----------------------------
+# 5. DELAYED RECALL
+# -----------------------------
+st.subheader("5. Final Memory Test")
+
+recall = st.text_input("Recall the words from the beginning (separate with spaces)")
+
+# -----------------------------
+# SCORING (simple prototype)
+# -----------------------------
+if st.button("Calculate Score"):
+
+    score = 0
+
+    # word recall scoring
+    correct_words = st.session_state.get("words", [])
+    user_words = recall.lower().split()
+
+    for w in correct_words:
+        if w in user_words:
+            score += 1
+
+    # attention scoring (very simple check)
+    if forward.strip() == "2 1 8 5 4":
+        score += 1
+    if backward.strip() == "2 4 7":
+        score += 1
+
+    # language (basic check)
+    if len(lang1) > 10:
+        score += 1
+    if len(lang2) > 10:
+        score += 1
+
+    # abstraction (basic check)
+    if len(t1) > 3:
+        score += 1
+    if len(t2) > 3:
+        score += 1
+
+    # -----------------------------
+    # RESULTS
+    # -----------------------------
+    st.subheader("Results")
+
+    if score >= 8:
+        st.success(f"🟢 Good cognitive performance (Score: {score})")
+    elif score >= 5:
+        st.warning(f"🟡 Moderate performance (Score: {score})")
     else:
-        st.success("🟢 Low risk: No strong indicators detected")
+        st.error(f"🔴 Low performance (Score: {score})")
 
-# --- OPTIONAL AUDIO (ONLY if installed) ---
-try:
-    from audio_recorder_streamlit import audio_recorder
-
-    st.subheader("3. Voice Input")
-
-    audio_bytes = audio_recorder()
-
-    if audio_bytes:
-        st.audio(audio_bytes, format="audio/wav")
-        st.write("Voice recorded successfully!")
-
-except:
-    st.info("Voice recorder not installed (optional feature)")
-
-# --- SECOND IMAGE (FIXED SYNTAX) ---
-st.image("image2.jpg", caption="Optional Image", use_container_width=True)
+    st.write("⚠️ This is a prototype screening tool, not a medical diagnosis.")
