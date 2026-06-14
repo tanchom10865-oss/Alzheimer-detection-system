@@ -160,3 +160,31 @@ if st.button("Calculate Score"):
         st.error("🔴 Needs review (prototype)")
 
     st.write("⚠️ Not a medical diagnosis tool")
+def audio_to_text(audio_data):
+    import speech_recognition as sr
+    from io import BytesIO
+
+    if audio_data is None:
+        return ""
+
+    # Try multiple possible keys safely
+    audio_bytes = (
+        audio_data.get("bytes")
+        or audio_data.get("audio")
+        or audio_data.get("blob")
+    )
+
+    if audio_bytes is None:
+        return ""
+
+    recognizer = sr.Recognizer()
+    audio_file = sr.AudioFile(BytesIO(audio_bytes))
+
+    with audio_file as source:
+        audio = recognizer.record(source)
+
+    try:
+        text = recognizer.recognize_google(audio)
+        return text.lower()
+    except:
+        return ""
