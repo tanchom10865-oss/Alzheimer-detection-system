@@ -33,8 +33,8 @@ st.write("---")
 # -----------------------------
 st.subheader("3. Language Repetition")
 
-lang1 = st.text_input("Repeat sentence 1")
-lang2 = st.text_input("Repeat sentence 2")
+lang1 = st.text_input("Repeat sentence 1 I only know that John is the one to help today")
+lang2 = st.text_input("Repeat sentence 2 The cat always hid under the couch when dogs were in the room")
 
 st.write("---")
 
