@@ -1,14 +1,2 @@
 streamlit
-streamlit-audiorecorder
-import streamlit as st
-from audiorecorder import audiorecorder
-
-st.title("🧠 Speech Test")
-
-st.subheader("Speak into the microphone")
-
-audio = audiorecorder("Click to record", "Recording...")
-
-if len(audio) > 0:
-    st.audio(audio.export().read())
-    st.success("Recording saved ✔")
+streamlit-mic-recorder
