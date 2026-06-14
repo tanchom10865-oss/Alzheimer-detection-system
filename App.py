@@ -1,13 +1,10 @@
 import streamlit as st
 
-st.title("Alzheimer's Detection System")
+st.title("🧠 Alzheimer’s Detection System")
 
 st.write("My Streamlit app is working!")
-import streamlit as st
 
-st.title("🧠 Cognitive Screening AI (Prototype)")
-
-# --- IMAGE ---
+# --- IMAGE SECTION ---
 st.subheader("1. Look at this image")
 
 st.image("image1.jpg", caption="Study Image", use_container_width=True)
@@ -27,7 +24,7 @@ q2 = st.radio(
 
 q3 = st.text_input("Describe the image in your own words:")
 
-# --- SIMPLE AI LOGIC (placeholder) ---
+# --- SIMPLE AI LOGIC ---
 score = 0
 
 if q1 == "I don't remember":
@@ -45,12 +42,21 @@ if st.button("Analyze"):
         st.warning("🟡 Moderate risk: Some memory issues detected")
     else:
         st.success("🟢 Low risk: No strong indicators detected")
-      pip install streamlit-audio-recorder
-from audio_recorder_streamlit import audio_recorder
 
-audio_bytes = audio_recorder()
+# --- OPTIONAL AUDIO (ONLY if installed) ---
+try:
+    from audio_recorder_streamlit import audio_recorder
 
-if audio_bytes:
-    st.audio(audio_bytes, format="audio/wav")
-    st.write("Voice recorded successfully!")
-st.image(image2.jpg")
+    st.subheader("3. Voice Input")
+
+    audio_bytes = audio_recorder()
+
+    if audio_bytes:
+        st.audio(audio_bytes, format="audio/wav")
+        st.write("Voice recorded successfully!")
+
+except:
+    st.info("Voice recorder not installed (optional feature)")
+
+# --- SECOND IMAGE (FIXED SYNTAX) ---
+st.image("image2.jpg", caption="Optional Image", use_container_width=True)
