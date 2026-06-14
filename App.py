@@ -101,18 +101,15 @@ if st.button("Calculate Score"):
 import streamlit as st
 from streamlit_mic_recorder import mic_recorder
 
-st.title("🧠 Speech Cognitive Test")
+st.title("🎤 Mic Test")
 
-st.subheader("Speak your answer")
+st.write("If this works, you will see a record button below.")
 
 audio = mic_recorder(
-    start_prompt="🎤 Click to record",
-    stop_prompt="⏹ Stop recording",
+    start_prompt="🎤 Start recording",
+    stop_prompt="⏹ Stop recording"
 )
 
 if audio:
-    st.success("Recording captured ✔")
-
+    st.success("Audio recorded ✔")
     st.audio(audio["bytes"])
-
-    st.write("Audio is ready for AI analysis")
