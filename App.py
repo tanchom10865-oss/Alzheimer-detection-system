@@ -5,30 +5,26 @@ import librosa
 from streamlit_webrtc import webrtc_streamer, AudioProcessorBase
 import av
 
-st.title("🧠 Cognitive Screening Test (Speech Biomarker AI)")
+st.title("🧠 Cognitive Speech Test (Stable Version)")
 
 # -----------------------------
-# 1. MEMORY WORDS
+# WORDS
 # -----------------------------
 st.subheader("1. Memorize these words")
-
 words = ["face", "velvet", "church", "daisy", "red"]
 st.write(words)
 
-st.session_state["words"] = words
-
 
 # -----------------------------
-# 2. AUDIO CAPTURE (MICROPHONE)
+# AUDIO PROCESSOR (FIXED)
 # -----------------------------
-st.subheader("2. Speak the words aloud")
-
-audio_buffer = []
-
 class AudioProcessor(AudioProcessorBase):
+    def __init__(self):
+        self.frames = []
+
     def recv(self, frame: av.AudioFrame) -> av.AudioFrame:
         audio = frame.to_ndarray()
-        audio_buffer.append(audio)
+        self.frames.append(audio)
         return frame
 
 
@@ -40,42 +36,44 @@ ctx = webrtc_streamer(
 
 
 # -----------------------------
-# 3. ANALYZE AUDIO BUTTON
+# ANALYZE BUTTON
 # -----------------------------
 if st.button("📊 Analyze Speech"):
 
-    if len(audio_buffer) == 0:
-        st.warning("No audio detected. Please speak first.")
+    processor = ctx.audio_processor
+
+    if processor is None or len(processor.frames) == 0:
+        st.warning("No audio recorded yet. Please speak first.")
         st.stop()
 
-    # Combine audio chunks
-    audio = np.concatenate(audio_buffer, axis=1).flatten()
+    # Combine audio safely
+    audio = np.concatenate(processor.frames, axis=1).flatten()
 
-    sr = 48000  # default browser sample rate
+    sr = 48000
 
-    # Convert to librosa format
     y = audio.astype(np.float32)
-    y = y / np.max(np.abs(y)) if np.max(np.abs(y)) > 0 else y
+
+    if np.max(np.abs(y)) > 0:
+        y = y / np.max(np.abs(y))
 
 
     # -----------------------------
-    # PITCH ANALYSIS
+    # PITCH
     # -----------------------------
     pitches, magnitudes = librosa.piptrack(y=y, sr=sr)
 
     pitch_values = []
-
     for t in range(pitches.shape[1]):
         index = magnitudes[:, t].argmax()
         pitch = pitches[index, t]
         if pitch > 0:
             pitch_values.append(pitch)
 
-    avg_pitch = np.mean(pitch_values) if len(pitch_values) > 0 else 0
+    avg_pitch = np.mean(pitch_values) if pitch_values else 0
 
 
     # -----------------------------
-    # FLUENCY (PAUSES + ENERGY)
+    # FLUENCY
     # -----------------------------
     intervals = librosa.effects.split(y, top_db=20)
     num_segments = len(intervals)
@@ -95,7 +93,7 @@ if st.button("📊 Analyze Speech"):
 
 
     # -----------------------------
-    # SIMPLE RISK MODEL
+    # SIMPLE MODEL
     # -----------------------------
     risk = 0
 
