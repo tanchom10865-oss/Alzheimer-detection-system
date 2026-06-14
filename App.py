@@ -1,18 +1,14 @@
-pip install streamlit streamlit-webrtc av librosa numpy scipy
 import streamlit as st
-import numpy as np
-import librosa
-from streamlit_webrtc import webrtc_streamer, AudioProcessorBase
-import av
 
-st.title("🧠 Alzheimer Cognitive Screening Test (Speech AI Prototype)")
+st.title("🧠 Cognitive Screening Test (No Voice Version)")
 
 # -----------------------------
-# 1. WORD MEMORY TEST
+# 1. WORD MEMORY
 # -----------------------------
 st.subheader("1. Word Memory Test")
 
 words = ["face", "velvet", "church", "daisy", "red"]
+
 st.write("Memorize these words:")
 st.write(words)
 
@@ -22,116 +18,76 @@ st.write("---")
 
 
 # -----------------------------
-# AUDIO PROCESSOR
+# 2. ATTENTION TEST
 # -----------------------------
-class AudioProcessor(AudioProcessorBase):
-    def __init__(self):
-        self.frames = []
+st.subheader("2. Attention Test")
 
-    def recv(self, frame: av.AudioFrame) -> av.AudioFrame:
-        audio = frame.to_ndarray()
-        self.frames.append(audio)
-        return frame
-
-
-ctx = webrtc_streamer(
-    key="mic",
-    audio_processor_factory=AudioProcessor,
-    media_stream_constraints={"audio": True, "video": False},
-)
-
-
-# -----------------------------
-# AUDIO ANALYSIS FUNCTION
-# -----------------------------
-def analyze(audio, sr=48000):
-
-    y = audio.astype(np.float32)
-
-    if np.max(np.abs(y)) > 0:
-        y = y / np.max(np.abs(y))
-
-    # pitch
-    pitches, mags = librosa.piptrack(y=y, sr=sr)
-    pitch_vals = []
-
-    for t in range(pitches.shape[1]):
-        i = mags[:, t].argmax()
-        p = pitches[i, t]
-        if p > 0:
-            pitch_vals.append(p)
-
-    avg_pitch = np.mean(pitch_vals) if pitch_vals else 0
-
-    # fluency (speech continuity)
-    segments = librosa.effects.split(y, top_db=20)
-    num_segments = len(segments)
-
-    rms = librosa.feature.rms(y=y)[0]
-    fluency = np.mean(rms)
-
-    return avg_pitch, num_segments, fluency
-
-
-# -----------------------------
-# 2–5 TEST SECTIONS
-# -----------------------------
-st.subheader("2–5. Speak During Tasks")
-
-st.write("👉 Please perform ALL tasks while recording:")
-st.write("""
-- Say numbers forward: 2 1 8 5 4  
-- Say numbers backward: 2 4 7  
-- Repeat sentences  
-- Recall words at the end  
-""")
+forward = st.text_input("Enter FORWARD numbers (e.g. 2 1 8 5 4)")
+backward = st.text_input("Enter BACKWARD numbers (e.g. 2 4 7)")
 
 st.write("---")
 
 
 # -----------------------------
-# ANALYZE BUTTON
+# 3. LANGUAGE TEST
 # -----------------------------
-if st.button("📊 Calculate Cognitive Score"):
+st.subheader("3. Language Repetition")
 
-    processor = ctx.audio_processor
+lang1 = st.text_input("Repeat sentence 1")
+lang2 = st.text_input("Repeat sentence 2")
 
-    if processor is None or len(processor.frames) == 0:
-        st.warning("No audio detected. Please record your voice first.")
-        st.stop()
+st.write("---")
 
-    audio = np.concatenate(processor.frames, axis=1).flatten()
 
-    pitch, segments, fluency = analyze(audio)
+# -----------------------------
+# 4. ABSTRACTION
+# -----------------------------
+st.subheader("4. Abstraction")
 
-    st.subheader("📊 Speech Biomarker Results")
+t1 = st.text_input("Train vs Bicycle similarity?")
+t2 = st.text_input("Watch vs Ruler similarity?")
 
-    st.write("🎯 Pitch (avg):", round(pitch, 2))
-    st.write("🧩 Speech Segments (pauses):", segments)
-    st.write("📈 Fluency Score:", round(fluency, 5))
 
-    # -----------------------------
-    # SCORING SYSTEM
-    # -----------------------------
+# -----------------------------
+# 5. DELAYED RECALL
+# -----------------------------
+st.subheader("5. Final Memory Test")
+
+recall = st.text_input("Type the words you remember")
+
+st.write("Words were: face, velvet, church, daisy, red")
+
+st.write("---")
+
+
+# -----------------------------
+# SCORING
+# -----------------------------
+if st.button("Calculate Score"):
+
     score = 0
 
-    # voice indicators
-    if pitch < 120:
+    # abstraction
+    if len(t1) > 2:
         score += 1
-    if segments > 10:
-        score += 1
-    if fluency < 0.02:
+    if len(t2) > 2:
         score += 1
 
-    # simple cognitive interpretation
-    st.subheader("🧠 Cognitive Indicator Result")
+    # recall scoring
+    correct_words = st.session_state.get("words", [])
 
-    if score == 0:
-        st.success("🟢 Low risk cognitive indicators")
-    elif score == 1:
-        st.warning("🟡 Mild risk indicators")
+    if recall:
+        found = sum(word in recall.lower() for word in correct_words)
+        score += found
+
+
+    st.subheader("Results")
+
+    if score >= 5:
+        st.success("🟢 Good performance (prototype)")
+    elif score >= 3:
+        st.warning("🟡 Mild concern (prototype)")
     else:
-        st.error("🔴 Higher risk indicators")
+        st.error("🔴 Needs review (prototype)")
 
-    st.write("---")
-    st.write("⚠️ This is a research prototype, not a medical diagnosis")
+    st.write("⚠️ Not a medical diagnosis tool")
