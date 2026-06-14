@@ -1,17 +1,19 @@
-pip install streamlit streamlit-webrtc av librosa scipy numpy
+pip install streamlit streamlit-webrtc av librosa numpy scipy
 import streamlit as st
-from streamlit_mic_recorder import mic_recorder
-import speech_recognition as sr
-from io import BytesIO
+import numpy as np
+import librosa
+from streamlit_webrtc import webrtc_streamer, AudioProcessorBase
+import av
 
-st.title("🧠 Cognitive Screening Test (Voice Enabled)")
+st.title("🧠 Alzheimer Cognitive Screening Test (Speech AI Prototype)")
 
 # -----------------------------
-# WORD MEMORY
+# 1. WORD MEMORY TEST
 # -----------------------------
-st.subheader("1. Memorize these words")
+st.subheader("1. Word Memory Test")
 
 words = ["face", "velvet", "church", "daisy", "red"]
+st.write("Memorize these words:")
 st.write(words)
 
 st.session_state["words"] = words
@@ -20,171 +22,116 @@ st.write("---")
 
 
 # -----------------------------
-# FUNCTION: AUDIO → TEXT
+# AUDIO PROCESSOR
 # -----------------------------
-def audio_to_text(audio_bytes):
-    recognizer = sr.Recognizer()
-    audio_file = sr.AudioFile(BytesIO(audio_bytes))
-    
-    with audio_file as source:
-        audio = recognizer.record(source)
+class AudioProcessor(AudioProcessorBase):
+    def __init__(self):
+        self.frames = []
 
-    try:
-        text = recognizer.recognize_google(audio)
-        return text.lower()
-    except:
-        return ""
+    def recv(self, frame: av.AudioFrame) -> av.AudioFrame:
+        audio = frame.to_ndarray()
+        self.frames.append(audio)
+        return frame
 
 
-# -----------------------------
-# 2. ATTENTION TEST
-# -----------------------------
-st.subheader("2. Attention Test (Speak answers)")
-
-audio_forward = mic_recorder(
-    start_prompt="🎤 Speak FORWARD numbers",
-    stop_prompt="⏹ Stop"
-)
-
-audio_backward = mic_recorder(
-    start_prompt="🎤 Speak BACKWARD numbers",
-    stop_prompt="⏹ Stop"
+ctx = webrtc_streamer(
+    key="mic",
+    audio_processor_factory=AudioProcessor,
+    media_stream_constraints={"audio": True, "video": False},
 )
 
 
-forward_text = ""
-backward_text = ""
+# -----------------------------
+# AUDIO ANALYSIS FUNCTION
+# -----------------------------
+def analyze(audio, sr=48000):
 
-if audio_forward:
-    forward_text = audio_to_text(audio_forward["bytes"])
-    st.write("You said (forward):", forward_text)
+    y = audio.astype(np.float32)
 
-if audio_backward:
-    backward_text = audio_to_text(audio_backward["bytes"])
-    st.write("You said (backward):", backward_text)
+    if np.max(np.abs(y)) > 0:
+        y = y / np.max(np.abs(y))
 
-st.write("Expected forward: 2 1 8 5 4")
-st.write("Expected backward: 2 4 7")
+    # pitch
+    pitches, mags = librosa.piptrack(y=y, sr=sr)
+    pitch_vals = []
+
+    for t in range(pitches.shape[1]):
+        i = mags[:, t].argmax()
+        p = pitches[i, t]
+        if p > 0:
+            pitch_vals.append(p)
+
+    avg_pitch = np.mean(pitch_vals) if pitch_vals else 0
+
+    # fluency (speech continuity)
+    segments = librosa.effects.split(y, top_db=20)
+    num_segments = len(segments)
+
+    rms = librosa.feature.rms(y=y)[0]
+    fluency = np.mean(rms)
+
+    return avg_pitch, num_segments, fluency
+
+
+# -----------------------------
+# 2–5 TEST SECTIONS
+# -----------------------------
+st.subheader("2–5. Speak During Tasks")
+
+st.write("👉 Please perform ALL tasks while recording:")
+st.write("""
+- Say numbers forward: 2 1 8 5 4  
+- Say numbers backward: 2 4 7  
+- Repeat sentences  
+- Recall words at the end  
+""")
 
 st.write("---")
 
 
 # -----------------------------
-# 3. LANGUAGE TEST
+# ANALYZE BUTTON
 # -----------------------------
-st.subheader("3. Language Repetition")
+if st.button("📊 Calculate Cognitive Score"):
 
-audio_lang1 = mic_recorder(
-    start_prompt="🎤 Repeat sentence 1",
-    stop_prompt="⏹ Stop",
-    key="lang1"
-)
+    processor = ctx.audio_processor
 
-audio_lang2 = mic_recorder(
-    start_prompt="🎤 Repeat sentence 2",
-    stop_prompt="⏹ Stop",
-    key="lang2"
-)
+    if processor is None or len(processor.frames) == 0:
+        st.warning("No audio detected. Please record your voice first.")
+        st.stop()
 
-lang1_text = ""
-lang2_text = ""
+    audio = np.concatenate(processor.frames, axis=1).flatten()
 
-if audio_lang1:
-    lang1_text = audio_to_text(audio_lang1["bytes"])
-    st.write("Sentence 1:", lang1_text)
+    pitch, segments, fluency = analyze(audio)
 
-if audio_lang2:
-    lang2_text = audio_to_text(audio_lang2["bytes"])
-    st.write("Sentence 2:", lang2_text)
+    st.subheader("📊 Speech Biomarker Results")
 
-st.write("---")
+    st.write("🎯 Pitch (avg):", round(pitch, 2))
+    st.write("🧩 Speech Segments (pauses):", segments)
+    st.write("📈 Fluency Score:", round(fluency, 5))
 
-
-# -----------------------------
-# 4. ABSTRACTION (VOICE OPTIONAL, TEXT HERE)
-# -----------------------------
-st.subheader("4. Abstraction")
-
-t1 = st.text_input("Train vs Bicycle similarity?")
-t2 = st.text_input("Watch vs Ruler similarity?")
-
-
-# -----------------------------
-# 5. DELAYED RECALL (VOICE)
-# -----------------------------
-st.subheader("5. Final Memory Test")
-
-audio_recall = mic_recorder(
-    start_prompt="🎤 Recall the words",
-    stop_prompt="⏹ Stop",
-    key="recall"
-)
-
-recall_text = ""
-
-if audio_recall:
-    recall_text = audio_to_text(audio_recall["bytes"])
-    st.write("You said:", recall_text)
-
-st.write("Words were: face, velvet, church, daisy, red")
-
-
-# -----------------------------
-# SCORING
-# -----------------------------
-if st.button("Calculate Score"):
-
+    # -----------------------------
+    # SCORING SYSTEM
+    # -----------------------------
     score = 0
 
-    # abstraction
-    if len(t1) > 2:
+    # voice indicators
+    if pitch < 120:
         score += 1
-    if len(t2) > 2:
+    if segments > 10:
+        score += 1
+    if fluency < 0.02:
         score += 1
 
-    # recall scoring
-    correct_words = st.session_state.get("words", [])
+    # simple cognitive interpretation
+    st.subheader("🧠 Cognitive Indicator Result")
 
-    if recall_text:
-        found = sum(word in recall_text for word in correct_words)
-        score += found
-
-
-    st.subheader("Results")
-
-    if score >= 5:
-        st.success("🟢 Good performance (prototype)")
-    elif score >= 3:
-        st.warning("🟡 Mild concern (prototype)")
+    if score == 0:
+        st.success("🟢 Low risk cognitive indicators")
+    elif score == 1:
+        st.warning("🟡 Mild risk indicators")
     else:
-        st.error("🔴 Needs review (prototype)")
+        st.error("🔴 Higher risk indicators")
 
-    st.write("⚠️ Not a medical diagnosis tool")
-def audio_to_text(audio_data):
-    import speech_recognition as sr
-    from io import BytesIO
-
-    if audio_data is None:
-        return ""
-
-    # Try multiple possible keys safely
-    audio_bytes = (
-        audio_data.get("bytes")
-        or audio_data.get("audio")
-        or audio_data.get("blob")
-    )
-
-    if audio_bytes is None:
-        return ""
-
-    recognizer = sr.Recognizer()
-    audio_file = sr.AudioFile(BytesIO(audio_bytes))
-
-    with audio_file as source:
-        audio = recognizer.record(source)
-
-    try:
-        text = recognizer.recognize_google(audio)
-        return text.lower()
-    except:
-        return ""
+    st.write("---")
+    st.write("⚠️ This is a research prototype, not a medical diagnosis")
