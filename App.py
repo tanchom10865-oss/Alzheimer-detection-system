@@ -98,3 +98,21 @@ if st.button("Calculate Score"):
         st.error(f"🔴 Low performance (Score: {score})")
 
     st.write("⚠️ This is a prototype screening tool, not a medical diagnosis.")
+import streamlit as st
+from streamlit_mic_recorder import mic_recorder
+
+st.title("🧠 Speech Cognitive Test")
+
+st.subheader("Speak your answer")
+
+audio = mic_recorder(
+    start_prompt="🎤 Click to record",
+    stop_prompt="⏹ Stop recording",
+)
+
+if audio:
+    st.success("Recording captured ✔")
+
+    st.audio(audio["bytes"])
+
+    st.write("Audio is ready for AI analysis")
