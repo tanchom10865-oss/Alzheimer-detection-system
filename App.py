@@ -1,14 +1,14 @@
+pip install streamlit streamlit-webrtc av librosa scipy numpy
 import streamlit as st
-import sounddevice as sd
-import scipy.io.wavfile as wav
-import tempfile
 import numpy as np
 import librosa
+from streamlit_webrtc import webrtc_streamer, AudioProcessorBase
+import av
 
-st.title("🧠 Cognitive Screening Test (Speech Biomarker Version)")
+st.title("🧠 Cognitive Screening Test (Speech Biomarker AI)")
 
 # -----------------------------
-# 1. WORD MEMORY
+# 1. MEMORY WORDS
 # -----------------------------
 st.subheader("1. Memorize these words")
 
@@ -19,88 +19,99 @@ st.session_state["words"] = words
 
 
 # -----------------------------
-# 2. RECORD SPEECH
+# 2. AUDIO CAPTURE (MICROPHONE)
 # -----------------------------
 st.subheader("2. Speak the words aloud")
 
-duration = st.slider("Recording time (seconds)", 3, 10, 5)
+audio_buffer = []
 
-if st.button("🎤 Start Recording"):
-
-    fs = 44100
-    audio = sd.rec(int(duration * fs), samplerate=fs, channels=1)
-    sd.wait()
-
-    # save audio file
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-        wav.write(tmp.name, fs, audio)
-
-        st.audio(tmp.name)
+class AudioProcessor(AudioProcessorBase):
+    def recv(self, frame: av.AudioFrame) -> av.AudioFrame:
+        audio = frame.to_ndarray()
+        audio_buffer.append(audio)
+        return frame
 
 
-        # -----------------------------
-        # LOAD AUDIO FOR ANALYSIS
-        # -----------------------------
-        y, sr = librosa.load(tmp.name)
+ctx = webrtc_streamer(
+    key="mic",
+    audio_processor_factory=AudioProcessor,
+    media_stream_constraints={"audio": True, "video": False},
+)
 
 
-        # -----------------------------
-        # 3. PITCH ANALYSIS
-        # -----------------------------
-        pitches, magnitudes = librosa.piptrack(y=y, sr=sr)
+# -----------------------------
+# 3. ANALYZE AUDIO BUTTON
+# -----------------------------
+if st.button("📊 Analyze Speech"):
 
-        pitch_values = []
+    if len(audio_buffer) == 0:
+        st.warning("No audio detected. Please speak first.")
+        st.stop()
 
-        for t in range(pitches.shape[1]):
-            index = magnitudes[:, t].argmax()
-            pitch = pitches[index, t]
-            if pitch > 0:
-                pitch_values.append(pitch)
+    # Combine audio chunks
+    audio = np.concatenate(audio_buffer, axis=1).flatten()
 
-        avg_pitch = np.mean(pitch_values) if len(pitch_values) > 0 else 0
+    sr = 48000  # default browser sample rate
 
-        st.subheader("📊 Speech Analysis Results")
-
-        st.write("🎯 Average Pitch:", round(avg_pitch, 2))
-
-
-        # -----------------------------
-        # 4. FLUENCY ANALYSIS (PAUSES + ENERGY)
-        # -----------------------------
-        intervals = librosa.effects.split(y, top_db=20)
-
-        num_speech_segments = len(intervals)
-
-        rms = librosa.feature.rms(y=y)[0]
-        fluency_score = np.mean(rms)
-
-        st.write("🧩 Speech Segments (pauses indicator):", num_speech_segments)
-        st.write("📈 Fluency Score:", round(fluency_score, 5))
+    # Convert to librosa format
+    y = audio.astype(np.float32)
+    y = y / np.max(np.abs(y)) if np.max(np.abs(y)) > 0 else y
 
 
-        # -----------------------------
-        # 5. SIMPLE RISK LOGIC (BASIC MODEL)
-        # -----------------------------
-        risk = 0
+    # -----------------------------
+    # PITCH ANALYSIS
+    # -----------------------------
+    pitches, magnitudes = librosa.piptrack(y=y, sr=sr)
 
-        # low pitch variation (very simplified rule)
-        if avg_pitch < 120:
-            risk += 1
+    pitch_values = []
 
-        # too many pauses
-        if num_speech_segments > 10:
-            risk += 1
+    for t in range(pitches.shape[1]):
+        index = magnitudes[:, t].argmax()
+        pitch = pitches[index, t]
+        if pitch > 0:
+            pitch_values.append(pitch)
 
-        # low fluency energy
-        if fluency_score < 0.02:
-            risk += 1
+    avg_pitch = np.mean(pitch_values) if len(pitch_values) > 0 else 0
 
 
-        st.subheader("🧠 Cognitive Indicator Score")
+    # -----------------------------
+    # FLUENCY (PAUSES + ENERGY)
+    # -----------------------------
+    intervals = librosa.effects.split(y, top_db=20)
+    num_segments = len(intervals)
 
-        if risk == 0:
-            st.success("Low risk indicators")
-        elif risk == 1:
-            st.warning("Mild risk indicators")
-        else:
-            st.error("Higher risk indicators")
+    rms = librosa.feature.rms(y=y)[0]
+    fluency = np.mean(rms)
+
+
+    # -----------------------------
+    # RESULTS
+    # -----------------------------
+    st.subheader("📊 Results")
+
+    st.write("🎯 Average Pitch:", round(avg_pitch, 2))
+    st.write("🧩 Speech Segments:", num_segments)
+    st.write("📈 Fluency Score:", round(fluency, 5))
+
+
+    # -----------------------------
+    # SIMPLE RISK MODEL
+    # -----------------------------
+    risk = 0
+
+    if avg_pitch < 120:
+        risk += 1
+    if num_segments > 10:
+        risk += 1
+    if fluency < 0.02:
+        risk += 1
+
+
+    st.subheader("🧠 Cognitive Indicator")
+
+    if risk == 0:
+        st.success("Low risk indicators")
+    elif risk == 1:
+        st.warning("Mild risk indicators")
+    else:
+        st.error("Higher risk indicators")
