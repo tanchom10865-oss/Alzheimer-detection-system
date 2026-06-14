@@ -1,115 +1,106 @@
 import streamlit as st
+import sounddevice as sd
+import scipy.io.wavfile as wav
+import tempfile
+import numpy as np
+import librosa
 
-st.title("🧠 Cognitive Screening Test (Prototype)")
+st.title("🧠 Cognitive Screening Test (Speech Biomarker Version)")
 
 # -----------------------------
-# 1. WORD MEMORY (ENCODING)
+# 1. WORD MEMORY
 # -----------------------------
 st.subheader("1. Memorize these words")
 
 words = ["face", "velvet", "church", "daisy", "red"]
-st.write("Remember these words:")
 st.write(words)
 
 st.session_state["words"] = words
 
-st.write("---")
 
 # -----------------------------
-# 2. ATTENTION TEST
+# 2. RECORD SPEECH
 # -----------------------------
-st.subheader("2. Attention Test")
+st.subheader("2. Speak the words aloud")
 
-forward = st.text_input("Repeat numbers FORWARD: 2 1 8 5 4")
-backward = st.text_input("Repeat numbers BACKWARD: 7 4 2")
+duration = st.slider("Recording time (seconds)", 3, 10, 5)
 
-st.write("---")
+if st.button("🎤 Start Recording"):
 
-# -----------------------------
-# 3. LANGUAGE TEST
-# -----------------------------
-st.subheader("3. Language Repetition")
+    fs = 44100
+    audio = sd.rec(int(duration * fs), samplerate=fs, channels=1)
+    sd.wait()
 
-lang1 = st.text_input("Repeat: I only know that John is the one to help today")
-lang2 = st.text_input("Repeat: The cat always hides under the couch when dogs are in the room")
+    # save audio file
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+        wav.write(tmp.name, fs, audio)
 
-st.write("---")
+        st.audio(tmp.name)
 
-# -----------------------------
-# 4. ABSTRACTION TEST
-# -----------------------------
-st.subheader("4. Abstraction")
 
-t1 = st.text_input("What is similar between: train and bicycle?")
-t2 = st.text_input("What is similar between: watch and ruler?")
+        # -----------------------------
+        # LOAD AUDIO FOR ANALYSIS
+        # -----------------------------
+        y, sr = librosa.load(tmp.name)
 
-st.write("---")
 
-# -----------------------------
-# 5. DELAYED RECALL
-# -----------------------------
-st.subheader("5. Final Memory Test")
+        # -----------------------------
+        # 3. PITCH ANALYSIS
+        # -----------------------------
+        pitches, magnitudes = librosa.piptrack(y=y, sr=sr)
 
-recall = st.text_input("Recall the words from the beginning (separate with spaces)")
+        pitch_values = []
 
-# -----------------------------
-# SCORING (simple prototype)
-# -----------------------------
-if st.button("Calculate Score"):
+        for t in range(pitches.shape[1]):
+            index = magnitudes[:, t].argmax()
+            pitch = pitches[index, t]
+            if pitch > 0:
+                pitch_values.append(pitch)
 
-    score = 0
+        avg_pitch = np.mean(pitch_values) if len(pitch_values) > 0 else 0
 
-    # word recall scoring
-    correct_words = st.session_state.get("words", [])
-    user_words = recall.lower().split()
+        st.subheader("📊 Speech Analysis Results")
 
-    for w in correct_words:
-        if w in user_words:
-            score += 1
+        st.write("🎯 Average Pitch:", round(avg_pitch, 2))
 
-    # attention scoring (very simple check)
-    if forward.strip() == "2 1 8 5 4":
-        score += 1
-    if backward.strip() == "2 4 7":
-        score += 1
 
-    # language (basic check)
-    if len(lang1) > 10:
-        score += 1
-    if len(lang2) > 10:
-        score += 1
+        # -----------------------------
+        # 4. FLUENCY ANALYSIS (PAUSES + ENERGY)
+        # -----------------------------
+        intervals = librosa.effects.split(y, top_db=20)
 
-    # abstraction (basic check)
-    if len(t1) > 3:
-        score += 1
-    if len(t2) > 3:
-        score += 1
+        num_speech_segments = len(intervals)
 
-    # -----------------------------
-    # RESULTS
-    # -----------------------------
-    st.subheader("Results")
+        rms = librosa.feature.rms(y=y)[0]
+        fluency_score = np.mean(rms)
 
-    if score >= 8:
-        st.success(f"🟢 Good cognitive performance (Score: {score})")
-    elif score >= 5:
-        st.warning(f"🟡 Moderate performance (Score: {score})")
-    else:
-        st.error(f"🔴 Low performance (Score: {score})")
+        st.write("🧩 Speech Segments (pauses indicator):", num_speech_segments)
+        st.write("📈 Fluency Score:", round(fluency_score, 5))
 
-    st.write("⚠️ This is a prototype screening tool, not a medical diagnosis.")
-import streamlit as st
-from streamlit_mic_recorder import mic_recorder
 
-st.title("🎤 Mic Test")
+        # -----------------------------
+        # 5. SIMPLE RISK LOGIC (BASIC MODEL)
+        # -----------------------------
+        risk = 0
 
-st.write("If this works, you will see a record button below.")
+        # low pitch variation (very simplified rule)
+        if avg_pitch < 120:
+            risk += 1
 
-audio = mic_recorder(
-    start_prompt="🎤 Start recording",
-    stop_prompt="⏹ Stop recording"
-)
+        # too many pauses
+        if num_speech_segments > 10:
+            risk += 1
 
-if audio:
-    st.success("Audio recorded ✔")
-    st.audio(audio["bytes"])
+        # low fluency energy
+        if fluency_score < 0.02:
+            risk += 1
+
+
+        st.subheader("🧠 Cognitive Indicator Score")
+
+        if risk == 0:
+            st.success("Low risk indicators")
+        elif risk == 1:
+            st.warning("Mild risk indicators")
+        else:
+            st.error("Higher risk indicators")
