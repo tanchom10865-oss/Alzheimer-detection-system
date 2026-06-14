@@ -1,115 +1,162 @@
 pip install streamlit streamlit-webrtc av librosa scipy numpy
 import streamlit as st
-import numpy as np
-import librosa
-from streamlit_webrtc import webrtc_streamer, AudioProcessorBase
-import av
+from streamlit_mic_recorder import mic_recorder
+import speech_recognition as sr
+from io import BytesIO
 
-st.title("🧠 Cognitive Speech Test (Stable Version)")
+st.title("🧠 Cognitive Screening Test (Voice Enabled)")
 
 # -----------------------------
-# WORDS
+# WORD MEMORY
 # -----------------------------
 st.subheader("1. Memorize these words")
+
 words = ["face", "velvet", "church", "daisy", "red"]
 st.write(words)
 
+st.session_state["words"] = words
+
+st.write("---")
+
 
 # -----------------------------
-# AUDIO PROCESSOR (FIXED)
+# FUNCTION: AUDIO → TEXT
 # -----------------------------
-class AudioProcessor(AudioProcessorBase):
-    def __init__(self):
-        self.frames = []
+def audio_to_text(audio_bytes):
+    recognizer = sr.Recognizer()
+    audio_file = sr.AudioFile(BytesIO(audio_bytes))
+    
+    with audio_file as source:
+        audio = recognizer.record(source)
 
-    def recv(self, frame: av.AudioFrame) -> av.AudioFrame:
-        audio = frame.to_ndarray()
-        self.frames.append(audio)
-        return frame
+    try:
+        text = recognizer.recognize_google(audio)
+        return text.lower()
+    except:
+        return ""
 
 
-ctx = webrtc_streamer(
-    key="mic",
-    audio_processor_factory=AudioProcessor,
-    media_stream_constraints={"audio": True, "video": False},
+# -----------------------------
+# 2. ATTENTION TEST
+# -----------------------------
+st.subheader("2. Attention Test (Speak answers)")
+
+audio_forward = mic_recorder(
+    start_prompt="🎤 Speak FORWARD numbers",
+    stop_prompt="⏹ Stop"
+)
+
+audio_backward = mic_recorder(
+    start_prompt="🎤 Speak BACKWARD numbers",
+    stop_prompt="⏹ Stop"
 )
 
 
+forward_text = ""
+backward_text = ""
+
+if audio_forward:
+    forward_text = audio_to_text(audio_forward["bytes"])
+    st.write("You said (forward):", forward_text)
+
+if audio_backward:
+    backward_text = audio_to_text(audio_backward["bytes"])
+    st.write("You said (backward):", backward_text)
+
+st.write("Expected forward: 2 1 8 5 4")
+st.write("Expected backward: 2 4 7")
+
+st.write("---")
+
+
 # -----------------------------
-# ANALYZE BUTTON
+# 3. LANGUAGE TEST
 # -----------------------------
-if st.button("📊 Analyze Speech"):
+st.subheader("3. Language Repetition")
 
-    processor = ctx.audio_processor
+audio_lang1 = mic_recorder(
+    start_prompt="🎤 Repeat sentence 1",
+    stop_prompt="⏹ Stop",
+    key="lang1"
+)
 
-    if processor is None or len(processor.frames) == 0:
-        st.warning("No audio recorded yet. Please speak first.")
-        st.stop()
+audio_lang2 = mic_recorder(
+    start_prompt="🎤 Repeat sentence 2",
+    stop_prompt="⏹ Stop",
+    key="lang2"
+)
 
-    # Combine audio safely
-    audio = np.concatenate(processor.frames, axis=1).flatten()
+lang1_text = ""
+lang2_text = ""
 
-    sr = 48000
+if audio_lang1:
+    lang1_text = audio_to_text(audio_lang1["bytes"])
+    st.write("Sentence 1:", lang1_text)
 
-    y = audio.astype(np.float32)
+if audio_lang2:
+    lang2_text = audio_to_text(audio_lang2["bytes"])
+    st.write("Sentence 2:", lang2_text)
 
-    if np.max(np.abs(y)) > 0:
-        y = y / np.max(np.abs(y))
-
-
-    # -----------------------------
-    # PITCH
-    # -----------------------------
-    pitches, magnitudes = librosa.piptrack(y=y, sr=sr)
-
-    pitch_values = []
-    for t in range(pitches.shape[1]):
-        index = magnitudes[:, t].argmax()
-        pitch = pitches[index, t]
-        if pitch > 0:
-            pitch_values.append(pitch)
-
-    avg_pitch = np.mean(pitch_values) if pitch_values else 0
+st.write("---")
 
 
-    # -----------------------------
-    # FLUENCY
-    # -----------------------------
-    intervals = librosa.effects.split(y, top_db=20)
-    num_segments = len(intervals)
+# -----------------------------
+# 4. ABSTRACTION (VOICE OPTIONAL, TEXT HERE)
+# -----------------------------
+st.subheader("4. Abstraction")
 
-    rms = librosa.feature.rms(y=y)[0]
-    fluency = np.mean(rms)
-
-
-    # -----------------------------
-    # RESULTS
-    # -----------------------------
-    st.subheader("📊 Results")
-
-    st.write("🎯 Average Pitch:", round(avg_pitch, 2))
-    st.write("🧩 Speech Segments:", num_segments)
-    st.write("📈 Fluency Score:", round(fluency, 5))
+t1 = st.text_input("Train vs Bicycle similarity?")
+t2 = st.text_input("Watch vs Ruler similarity?")
 
 
-    # -----------------------------
-    # SIMPLE MODEL
-    # -----------------------------
-    risk = 0
+# -----------------------------
+# 5. DELAYED RECALL (VOICE)
+# -----------------------------
+st.subheader("5. Final Memory Test")
 
-    if avg_pitch < 120:
-        risk += 1
-    if num_segments > 10:
-        risk += 1
-    if fluency < 0.02:
-        risk += 1
+audio_recall = mic_recorder(
+    start_prompt="🎤 Recall the words",
+    stop_prompt="⏹ Stop",
+    key="recall"
+)
+
+recall_text = ""
+
+if audio_recall:
+    recall_text = audio_to_text(audio_recall["bytes"])
+    st.write("You said:", recall_text)
+
+st.write("Words were: face, velvet, church, daisy, red")
 
 
-    st.subheader("🧠 Cognitive Indicator")
+# -----------------------------
+# SCORING
+# -----------------------------
+if st.button("Calculate Score"):
 
-    if risk == 0:
-        st.success("Low risk indicators")
-    elif risk == 1:
-        st.warning("Mild risk indicators")
+    score = 0
+
+    # abstraction
+    if len(t1) > 2:
+        score += 1
+    if len(t2) > 2:
+        score += 1
+
+    # recall scoring
+    correct_words = st.session_state.get("words", [])
+
+    if recall_text:
+        found = sum(word in recall_text for word in correct_words)
+        score += found
+
+
+    st.subheader("Results")
+
+    if score >= 5:
+        st.success("🟢 Good performance (prototype)")
+    elif score >= 3:
+        st.warning("🟡 Mild concern (prototype)")
     else:
-        st.error("Higher risk indicators")
+        st.error("🔴 Needs review (prototype)")
+
+    st.write("⚠️ Not a medical diagnosis tool")
