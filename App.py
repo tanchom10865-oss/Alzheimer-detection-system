@@ -120,18 +120,42 @@ st.write("---")
 # ─────────────────────────────────────────────
 st.subheader("4. Abstraction")
 
-
+# --- Question 1 ---
 st.markdown("**How are a Train and a Bicycle similar?**")
-abs1 = voice_input("🎙 Record your answer", "abs1")
+
+# Notice we changed the widget key name to "abs1_widget" to avoid the collision
+abs1 = voice_input("🎙️ Record your answer", "abs1_widget")
+
 if abs1:
     st.success(f"You said: **{abs1}**")
-    st.session_state["abs1"] = abs1
+    
+    # Normalize text to lowercase for cleaner matching
+    answer1_lower = abs1.lower()
+    vehicle_keywords = ["vehicle", "transport", "transportation", "wheels", "ride", "travel", "move"]
+    
+    if any(keyword in answer1_lower for keyword in vehicle_keywords):
+        st.info("🎯 Correct! They are both forms of vehicles/transportation.")
+    else:
+        st.warning("⚠️ That's an interesting answer, but think about how they move people or things!")
 
+
+# --- Question 2 ---
 st.markdown("**How are a Watch and a Ruler similar?**")
-abs2 = voice_input("🎙 Record your answer", "abs2")
+
+# Changed the widget key name to "abs2_widget" to avoid the collision
+abs2 = voice_input("🎙️ Record your answer", "abs2_widget")
+
 if abs2:
     st.success(f"You said: **{abs2}**")
-    st.session_state["abs2"] = abs2
+    
+    # Normalize text to lowercase
+    answer2_lower = abs2.lower()
+    measurement_keywords = ["measure", "measurement", "tool", "instrument", "scale", "tell time", "numbers"]
+    
+    if any(keyword in answer2_lower for keyword in measurement_keywords):
+        st.info("🎯 Correct! They are both tools used for measurement (time and length).")
+    else:
+        st.warning("⚠️ Not quite! Think about what both of these objects are used to do.")
 
 st.write("---")
 
