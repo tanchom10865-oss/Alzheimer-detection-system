@@ -1,8 +1,8 @@
 import streamlit as st
-from streamlit_mic_recorder import mic_recorder
 import speech_recognition as sr
 import tempfile
 import os
+import io
 
 st.title("🧠 Cognitive Screening Test (Voice Attention Test)")
 
@@ -17,7 +17,7 @@ st.session_state["words"] = words
 st.write("---")
 
 # -----------------------------
-# 2. ATTENTION TEST (VOICE) — improved
+# 2. ATTENTION TEST (VOICE)
 # -----------------------------
 st.subheader("2. Attention Test")
 
@@ -49,11 +49,10 @@ def transcribe_audio(audio_bytes: bytes) -> str | None:
         os.unlink(audio_path)
 
 
-def digits_in_order(text: str, sequence: list[str]) -> bool:
+def digits_in_order(text: str, sequence: list) -> bool:
     """Return True if every digit in *sequence* appears in *text* in the correct order."""
     if not text:
         return False
-    # Extract only digit characters from the recognised text
     spoken_digits = [ch for ch in text if ch.isdigit()]
     return spoken_digits == sequence
 
@@ -63,25 +62,20 @@ def score_forward(text: str) -> bool:
 
 
 def score_backward(text: str) -> bool:
-    # The examiner says "7 4 2"; the patient must reply in reverse: "2 4 7"
     return digits_in_order(text, list(reversed(BACKWARD_SEQUENCE)))
 
 
 # ── Forward digit span ──────────────────────────────────────────────────────
 st.markdown("#### 🔢 Forward Digit Span")
-st.write("Listen, then say: **2 – 1 – 8 – 5 – 4**")
+st.write("Record yourself saying: **2 – 1 – 8 – 5 – 4**")
 
-audio_forward = mic_recorder(
-    start_prompt="▶ Start Recording (forward)",
-    stop_prompt="⏹ Stop Recording",
-    key="forward_audio",
-)
+audio_forward = st.audio_input("Forward recording", key="forward_audio")
 
 forward_text = st.session_state.get("forward_text", "")
 
-if audio_forward and audio_forward.get("bytes"):
+if audio_forward is not None:
     with st.spinner("Transcribing…"):
-        result = transcribe_audio(audio_forward["bytes"])
+        result = transcribe_audio(audio_forward.read())
     if result is not None:
         forward_text = result
         st.session_state["forward_text"] = forward_text
@@ -97,19 +91,15 @@ elif forward_text:
 
 # ── Backward digit span ─────────────────────────────────────────────────────
 st.markdown("#### 🔁 Backward Digit Span")
-st.write("You will hear **7 – 4 – 2**. Say them **backwards**: **2 – 4 – 7**")
+st.write("You will hear **7 – 4 – 2**. Record yourself saying them **backwards**: **2 – 4 – 7**")
 
-audio_backward = mic_recorder(
-    start_prompt="▶ Start Recording (backward)",
-    stop_prompt="⏹ Stop Recording",
-    key="backward_audio",
-)
+audio_backward = st.audio_input("Backward recording", key="backward_audio")
 
 backward_text = st.session_state.get("backward_text", "")
 
-if audio_backward and audio_backward.get("bytes"):
+if audio_backward is not None:
     with st.spinner("Transcribing…"):
-        result = transcribe_audio(audio_backward["bytes"])
+        result = transcribe_audio(audio_backward.read())
     if result is not None:
         backward_text = result
         st.session_state["backward_text"] = backward_text
@@ -126,29 +116,25 @@ elif backward_text:
 # ── Vigilance / sustained attention ─────────────────────────────────────────
 st.markdown("#### 🎯 Vigilance Task")
 st.write(
-    "Listen to the letter sequence below. Tap **[space]** or say **'yes'** every time you hear the letter **A**."
+    "Read the letter sequence below. Say **'yes'** every time you see the letter **A**, "
+    "then record your responses."
 )
 VIGILANCE_SEQUENCE = "F B A C M N A A B C L A F M A K"
 st.code(VIGILANCE_SEQUENCE, language=None)
 VIGILANCE_A_POSITIONS = [i for i, ch in enumerate(VIGILANCE_SEQUENCE.split()) if ch == "A"]
 st.caption(f"There are {len(VIGILANCE_A_POSITIONS)} A's in this sequence.")
 
-audio_vigilance = mic_recorder(
-    start_prompt="▶ Start Vigilance Recording",
-    stop_prompt="⏹ Stop Recording",
-    key="vigilance_audio",
-)
+audio_vigilance = st.audio_input("Vigilance recording", key="vigilance_audio")
 
 vigilance_text = st.session_state.get("vigilance_text", "")
 
-if audio_vigilance and audio_vigilance.get("bytes"):
+if audio_vigilance is not None:
     with st.spinner("Transcribing…"):
-        result = transcribe_audio(audio_vigilance["bytes"])
+        result = transcribe_audio(audio_vigilance.read())
     if result is not None:
         vigilance_text = result
         st.session_state["vigilance_text"] = vigilance_text
         st.success(f"You said: **{vigilance_text}**")
-        # Count how many times "yes" / "a" / "yeah" was detected as a proxy for taps
         spoken_words = vigilance_text.lower().split()
         tap_count = sum(1 for w in spoken_words if w in {"yes", "yeah", "a", "ay", "yep"})
         st.info(f"Detected ~{tap_count} response(s). Expected {len(VIGILANCE_A_POSITIONS)}.")
@@ -194,37 +180,30 @@ if st.button("Calculate Score"):
     score = 0
     details = []
 
-    # ── Attention ──────────────────────────────────────────────────────────
     fwd = st.session_state.get("forward_text", "")
     bwd = st.session_state.get("backward_text", "")
 
-    fwd_ok = score_forward(fwd)
-    bwd_ok = score_backward(bwd)
-
-    if fwd_ok:
+    if score_forward(fwd):
         score += 1
         details.append("✅ Forward digit span: correct")
     else:
         details.append("❌ Forward digit span: incorrect")
 
-    if bwd_ok:
+    if score_backward(bwd):
         score += 1
         details.append("✅ Backward digit span: correct")
     else:
         details.append("❌ Backward digit span: incorrect")
 
-    # Vigilance — rough heuristic
     vig_text = st.session_state.get("vigilance_text", "")
     vig_words = vig_text.lower().split() if vig_text else []
     vig_taps = sum(1 for w in vig_words if w in {"yes", "yeah", "a", "ay", "yep"})
-    vig_ok = abs(vig_taps - len(VIGILANCE_A_POSITIONS)) <= 1
-    if vig_ok:
+    if abs(vig_taps - len(VIGILANCE_A_POSITIONS)) <= 1:
         score += 1
         details.append(f"✅ Vigilance: ~{vig_taps} taps (expected {len(VIGILANCE_A_POSITIONS)})")
     else:
         details.append(f"❌ Vigilance: ~{vig_taps} taps (expected {len(VIGILANCE_A_POSITIONS)})")
 
-    # ── Abstraction ────────────────────────────────────────────────────────
     if len(t1.strip()) > 2:
         score += 1
         details.append("✅ Abstraction 1: answered")
@@ -237,7 +216,6 @@ if st.button("Calculate Score"):
     else:
         details.append("❌ Abstraction 2: no answer")
 
-    # ── Delayed recall ─────────────────────────────────────────────────────
     correct_words = st.session_state.get("words", [])
     found = 0
     if recall:
@@ -245,7 +223,6 @@ if st.button("Calculate Score"):
         score += found
     details.append(f"🧠 Delayed recall: {found}/{len(correct_words)} words")
 
-    # ── Display ────────────────────────────────────────────────────────────
     st.subheader("Results")
     for d in details:
         st.write(d)
