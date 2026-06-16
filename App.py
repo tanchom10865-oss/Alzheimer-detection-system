@@ -171,4 +171,3 @@ if st.button("Calculate Score"):
         st.error("🔴 Needs review (prototype)")
 
     st.write("⚠️ Not a medical diagnosis tool")
-```
