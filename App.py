@@ -7,6 +7,10 @@ st.title("🧠 Cognitive Screening Test")
 
 SENTENCE_1 = "I only know that John is the one to help today"
 SENTENCE_2 = "The cat always hid under the couch when dogs were in the room"
+WORDS = ["face", "velvet", "church", "daisy", "red"]
+FORWARD_SEQUENCE = ["2", "1", "8", "5", "4"]
+BACKWARD_SEQUENCE = ["2", "4", "7"]
+
 
 def transcribe_audio(audio_bytes: bytes) -> str | None:
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
@@ -25,6 +29,7 @@ def transcribe_audio(audio_bytes: bytes) -> str | None:
     finally:
         os.unlink(audio_path)
 
+
 def similarity_score(spoken: str, reference: str) -> float:
     ref_words = set(reference.lower().split())
     spoken_words = set(spoken.lower().split())
@@ -32,106 +37,137 @@ def similarity_score(spoken: str, reference: str) -> float:
         return 0.0
     return len(ref_words & spoken_words) / len(ref_words)
 
-# -----------------------------
+
+def digits_in_order(text: str, sequence: list) -> bool:
+    spoken_digits = [ch for ch in text if ch.isdigit()]
+    return spoken_digits == sequence
+
+
+def voice_input(label: str, key: str):
+    """Show audio recorder, transcribe only when new bytes arrive. Returns transcript string."""
+    audio = st.audio_input(label, key=key)
+    if audio is not None:
+        audio_bytes = audio.read()
+        if audio_bytes != st.session_state.get(f"{key}_bytes"):
+            st.session_state[f"{key}_bytes"] = audio_bytes
+            with st.spinner("Transcribing…"):
+                result = transcribe_audio(audio_bytes)
+            st.session_state[f"{key}_text"] = result if result else ""
+            if result is None:
+                st.error("Could not recognise — please try again.")
+    return st.session_state.get(f"{key}_text", "")
+
+
+# ─────────────────────────────────────────────
 # 1. WORD MEMORY
-# -----------------------------
+# ─────────────────────────────────────────────
 st.subheader("1. Word Memory Test")
-words = ["face", "velvet", "church", "daisy", "red"]
 st.write("Memorize these words:")
-st.write(words)
-st.session_state["words"] = words
+st.info("  ·  ".join(WORDS))
+st.session_state["words"] = WORDS
 st.write("---")
 
-# -----------------------------
-# 2. ATTENTION TEST
-# -----------------------------
+# ─────────────────────────────────────────────
+# 2. ATTENTION TEST — voice
+# ─────────────────────────────────────────────
 st.subheader("2. Attention Test")
-forward = st.text_input("Enter FORWARD numbers (e.g. 2 1 8 5 4)")
-backward = st.text_input("Enter BACKWARD numbers (e.g. 2 4 7)")
+
+st.markdown("**Forward Digit Span** — say these numbers in the same order:")
+st.info("2 – 1 – 8 – 5 – 4")
+fwd = voice_input("🎙 Record forward numbers", "fwd")
+if fwd:
+    st.success(f"You said: **{fwd}**")
+    fwd_ok = digits_in_order(fwd, FORWARD_SEQUENCE)
+    st.write("✅ Correct!" if fwd_ok else "❌ Not quite.")
+    st.session_state["fwd_ok"] = fwd_ok
+
+st.markdown("**Backward Digit Span** — say **7 – 4 – 2** in reverse:")
+st.info("Say: 2 – 4 – 7")
+bwd = voice_input("🎙 Record backward numbers", "bwd")
+if bwd:
+    st.success(f"You said: **{bwd}**")
+    bwd_ok = digits_in_order(bwd, BACKWARD_SEQUENCE)
+    st.write("✅ Correct!" if bwd_ok else "❌ Not quite.")
+    st.session_state["bwd_ok"] = bwd_ok
+
 st.write("---")
 
-# -----------------------------
-# 3. LANGUAGE TEST (VOICE)
-# -----------------------------
+# ─────────────────────────────────────────────
+# 3. LANGUAGE REPETITION — voice
+# ─────────────────────────────────────────────
 st.subheader("3. Language Repetition")
 
-# ── Sentence 1 ──────────────────────────────────────────────────────────────
 st.markdown(f"**Sentence 1:** {SENTENCE_1}")
-st.write("Record yourself repeating this sentence:")
+lang1 = voice_input("🎙 Record sentence 1", "lang1")
+if lang1:
+    sc = similarity_score(lang1, SENTENCE_1)
+    st.success(f"You said: **{lang1}**")
+    st.progress(sc, text=f"Match: {sc:.0%}")
+    st.session_state["lang1_score"] = sc
 
-audio_lang1 = st.audio_input("🎙 Sentence 1", key="lang1_audio")
-
-# transcribe only when new audio arrives (bytes changed)
-if audio_lang1 is not None:
-    audio_bytes = audio_lang1.read()
-    prev = st.session_state.get("lang1_bytes")
-    if audio_bytes != prev:
-        st.session_state["lang1_bytes"] = audio_bytes
-        with st.spinner("Transcribing…"):
-            result = transcribe_audio(audio_bytes)
-        if result is not None:
-            st.session_state["lang1_text"] = result
-            st.session_state["lang1_score"] = similarity_score(result, SENTENCE_1)
-        else:
-            st.session_state["lang1_text"] = ""
-            st.session_state["lang1_score"] = 0.0
-            st.error("Could not recognise — please try again.")
-
-if st.session_state.get("lang1_text"):
-    st.success(f"You said: **{st.session_state['lang1_text']}**")
-    st.progress(st.session_state["lang1_score"],
-                text=f"Match: {st.session_state['lang1_score']:.0%}")
-
-# ── Sentence 2 ──────────────────────────────────────────────────────────────
 st.markdown(f"**Sentence 2:** {SENTENCE_2}")
-st.write("Record yourself repeating this sentence:")
-
-audio_lang2 = st.audio_input("🎙 Sentence 2", key="lang2_audio")
-
-if audio_lang2 is not None:
-    audio_bytes = audio_lang2.read()
-    prev = st.session_state.get("lang2_bytes")
-    if audio_bytes != prev:
-        st.session_state["lang2_bytes"] = audio_bytes
-        with st.spinner("Transcribing…"):
-            result = transcribe_audio(audio_bytes)
-        if result is not None:
-            st.session_state["lang2_text"] = result
-            st.session_state["lang2_score"] = similarity_score(result, SENTENCE_2)
-        else:
-            st.session_state["lang2_text"] = ""
-            st.session_state["lang2_score"] = 0.0
-            st.error("Could not recognise — please try again.")
-
-if st.session_state.get("lang2_text"):
-    st.success(f"You said: **{st.session_state['lang2_text']}**")
-    st.progress(st.session_state["lang2_score"],
-                text=f"Match: {st.session_state['lang2_score']:.0%}")
+lang2 = voice_input("🎙 Record sentence 2", "lang2")
+if lang2:
+    sc = similarity_score(lang2, SENTENCE_2)
+    st.success(f"You said: **{lang2}**")
+    st.progress(sc, text=f"Match: {sc:.0%}")
+    st.session_state["lang2_score"] = sc
 
 st.write("---")
 
-# -----------------------------
-# 4. ABSTRACTION
-# -----------------------------
+# ─────────────────────────────────────────────
+# 4. ABSTRACTION — voice
+# ─────────────────────────────────────────────
 st.subheader("4. Abstraction")
-t1 = st.text_input("Train vs Bicycle similarity?")
-t2 = st.text_input("Watch vs Ruler similarity?")
 
-# -----------------------------
-# 5. DELAYED RECALL
-# -----------------------------
-st.subheader("5. Final Memory Test")
-recall = st.text_input("Type the words you remember")
-st.write("Words were: face, velvet, church, daisy, red")
+st.markdown("**How are a Train and a Bicycle similar?**")
+abs1 = voice_input("🎙 Record your answer", "abs1")
+if abs1:
+    st.success(f"You said: **{abs1}**")
+    st.session_state["abs1"] = abs1
+
+st.markdown("**How are a Watch and a Ruler similar?**")
+abs2 = voice_input("🎙 Record your answer", "abs2")
+if abs2:
+    st.success(f"You said: **{abs2}**")
+    st.session_state["abs2"] = abs2
+
 st.write("---")
 
-# -----------------------------
+# ─────────────────────────────────────────────
+# 5. DELAYED RECALL — voice, NO hint
+# ─────────────────────────────────────────────
+st.subheader("5. Final Memory Test")
+st.write("Say as many words as you can remember from the beginning:")
+
+recall = voice_input("🎙 Record the words you remember", "recall")
+if recall:
+    st.success(f"You said: **{recall}**")
+    st.session_state["recall"] = recall
+
+st.write("---")
+
+# ─────────────────────────────────────────────
 # SCORING
-# -----------------------------
+# ─────────────────────────────────────────────
 if st.button("Calculate Score"):
     score = 0
     details = []
 
+    # Attention
+    if st.session_state.get("fwd_ok"):
+        score += 1
+        details.append("✅ Forward digit span: correct")
+    else:
+        details.append("❌ Forward digit span: incorrect")
+
+    if st.session_state.get("bwd_ok"):
+        score += 1
+        details.append("✅ Backward digit span: correct")
+    else:
+        details.append("❌ Backward digit span: incorrect")
+
+    # Language
     s1 = st.session_state.get("lang1_score", 0.0)
     s2 = st.session_state.get("lang2_score", 0.0)
     if s1 >= 0.6:
@@ -145,33 +181,36 @@ if st.button("Calculate Score"):
     else:
         details.append(f"❌ Sentence 2: {s2:.0%} match (need ≥ 60%)")
 
-    if len(t1.strip()) > 2:
+    # Abstraction
+    if len(st.session_state.get("abs1", "").strip()) > 2:
         score += 1
         details.append("✅ Abstraction 1: answered")
     else:
         details.append("❌ Abstraction 1: no answer")
-    if len(t2.strip()) > 2:
+    if len(st.session_state.get("abs2", "").strip()) > 2:
         score += 1
         details.append("✅ Abstraction 2: answered")
     else:
         details.append("❌ Abstraction 2: no answer")
 
-    correct_words = st.session_state.get("words", [])
-    found = 0
-    if recall:
-        found = sum(word in recall.lower() for word in correct_words)
-        score += found
-    details.append(f"🧠 Delayed recall: {found}/{len(correct_words)} words")
+    # Delayed recall — no hint was shown
+    recall_spoken = st.session_state.get("recall", "")
+    found = sum(w in recall_spoken.lower() for w in WORDS) if recall_spoken else 0
+    score += found
+    details.append(f"🧠 Delayed recall: {found}/{len(WORDS)} words")
 
     st.subheader("Results")
     for d in details:
         st.write(d)
-    st.write(f"**Total Score: {score}**")
 
-    if score >= 5:
+    max_score = 2 + 2 + 2 + len(WORDS)
+    st.write(f"**Total Score: {score} / {max_score}**")
+
+    if score >= int(max_score * 0.7):
         st.success("🟢 Good performance (prototype)")
-    elif score >= 3:
+    elif score >= int(max_score * 0.4):
         st.warning("🟡 Mild concern (prototype)")
     else:
         st.error("🔴 Needs review (prototype)")
 
+    st.caption("⚠️ Not a medical diagnosis tool")
