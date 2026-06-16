@@ -122,40 +122,38 @@ st.subheader("4. Abstraction")
 
 # --- Question 1 ---
 st.markdown("**How are a Train and a Bicycle similar?**")
-
-# Notice we changed the widget key name to "abs1_widget" to avoid the collision
 abs1 = voice_input("🎙️ Record your answer", "abs1_widget")
 
 if abs1:
     st.success(f"You said: **{abs1}**")
     
-    # Normalize text to lowercase for cleaner matching
     answer1_lower = abs1.lower()
     vehicle_keywords = ["vehicle", "transport", "transportation", "wheels", "ride", "travel", "move"]
     
     if any(keyword in answer1_lower for keyword in vehicle_keywords):
         st.info("🎯 Correct! They are both forms of vehicles/transportation.")
+        st.session_state["abs1_correct"] = True
     else:
         st.warning("⚠️ That's an interesting answer, but think about how they move people or things!")
+        st.session_state["abs1_correct"] = False
 
 
 # --- Question 2 ---
 st.markdown("**How are a Watch and a Ruler similar?**")
-
-# Changed the widget key name to "abs2_widget" to avoid the collision
 abs2 = voice_input("🎙️ Record your answer", "abs2_widget")
 
 if abs2:
     st.success(f"You said: **{abs2}**")
     
-    # Normalize text to lowercase
     answer2_lower = abs2.lower()
     measurement_keywords = ["measure", "measurement", "tool", "instrument", "scale", "tell time", "numbers"]
     
     if any(keyword in answer2_lower for keyword in measurement_keywords):
         st.info("🎯 Correct! They are both tools used for measurement (time and length).")
+        st.session_state["abs2_correct"] = True
     else:
         st.warning("⚠️ Not quite! Think about what both of these objects are used to do.")
+        st.session_state["abs2_correct"] = False
 
 st.write("---")
 
@@ -165,10 +163,23 @@ st.write("---")
 st.subheader("5. Final Memory Test")
 st.write("Say as many words as you can remember from the beginning:")
 
-recall = voice_input("🎙 Record the words you remember", "recall")
+recall = voice_input("🎙 Record the words you remember", "recall_widget")
+
 if recall:
     st.success(f"You said: **{recall}**")
-    st.session_state["recall"] = recall
+    
+    spoken_text = recall.lower()
+    words_found = [word for word in WORDS if word in spoken_text]
+    score_recall = len(words_found)
+    total_words = len(WORDS)
+    
+    # Calculate performance metrics
+    pct = score_recall / total_words
+    st.progress(pct, text=f"Words Remembered Accuracy: {pct:.0%}")
+    st.write(f"📊 **Score:** {score_recall} out of {total_words} words recognized.")
+    
+    # Save values to session state cleanly without collisions
+    st.session_state["recall_score_count"] = score_recall
 
 st.write("---")
 
@@ -207,20 +218,20 @@ if st.button("Calculate Score"):
         details.append(f"❌ Sentence 2: {s2:.0%} match (need ≥ 60%)")
 
     # Abstraction
-    if len(st.session_state.get("abs1", "").strip()) > 2:
+    if st.session_state.get("abs1_correct"):
         score += 1
-        details.append("✅ Abstraction 1: answered")
+        details.append("✅ Abstraction 1: correct keyword match")
     else:
-        details.append("❌ Abstraction 1: no answer")
-    if len(st.session_state.get("abs2", "").strip()) > 2:
+        details.append("❌ Abstraction 1: incorrect or missing category description")
+        
+    if st.session_state.get("abs2_correct"):
         score += 1
-        details.append("✅ Abstraction 2: answered")
+        details.append("✅ Abstraction 2: correct keyword match")
     else:
-        details.append("❌ Abstraction 2: no answer")
+        details.append("❌ Abstraction 2: incorrect or missing category description")
 
-    # Delayed recall — no hint was shown
-    recall_spoken = st.session_state.get("recall", "")
-    found = sum(w in recall_spoken.lower() for w in WORDS) if recall_spoken else 0
+    # Delayed recall
+    found = st.session_state.get("recall_score_count", 0)
     score += found
     details.append(f"🧠 Delayed recall: {found}/{len(WORDS)} words")
 
