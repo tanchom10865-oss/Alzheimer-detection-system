@@ -120,6 +120,7 @@ st.write("---")
 # ─────────────────────────────────────────────
 st.subheader("4. Abstraction")
 
+
 st.markdown("**How are a Train and a Bicycle similar?**")
 abs1 = voice_input("🎙 Record your answer", "abs1")
 if abs1:
