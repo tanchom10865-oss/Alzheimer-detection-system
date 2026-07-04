@@ -1,5 +1,4 @@
-pip install streamlit SpeechRecognition
-streamlit run cognitive_screening_bilingual.py
+
 import streamlit as st
 import speech_recognition as sr
 import tempfile
