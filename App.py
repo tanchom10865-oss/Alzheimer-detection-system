@@ -3,6 +3,7 @@ import speech_recognition as sr
 import tempfile
 import os
 import datetime
+import difflib
 
 # ─────────────────────────────────────────────
 # LANGUAGE SELECTION (must happen first)
@@ -160,6 +161,12 @@ STR = {
     "review": ("🔴 ควรได้รับการตรวจประเมินเพิ่มเติม (ต้นแบบ/Prototype)", "🔴 Needs review (prototype)"),
     "disclaimer": ("⚠️ นี่ไม่ใช่เครื่องมือวินิจฉัยทางการแพทย์ กรุณาปรึกษาแพทย์ผู้เชี่ยวชาญเพื่อการวินิจฉัยที่ถูกต้อง",
                     "⚠️ Not a medical diagnosis tool. Please consult a qualified professional for an accurate diagnosis."),
+    "not_attempted": ("⚪ ยังไม่ได้ตอบ", "⚪ Not attempted"),
+    "coverage_warning": (
+        "⚠️ คุณตอบเพียง {done}/{total} ส่วนของแบบทดสอบ ผลลัพธ์นี้อาจไม่สะท้อนภาพรวมที่แม่นยำ กรุณาทำแบบทดสอบให้ครบทุกส่วนเพื่อผลลัพธ์ที่น่าเชื่อถือมากขึ้น",
+        "⚠️ You only completed {done}/{total} parts of this test. This result may not be reliable — please complete more sections for an accurate screening.",
+    ),
+    "score_on_attempted": ("**คะแนน (จากส่วนที่ตอบแล้ว):", "**Score (of sections attempted):"),
 }
 
 # ─────────────────────────────────────────────
@@ -275,14 +282,44 @@ def similarity_score(spoken: str, reference: str) -> float:
     return matches / max(len(reference.split()), 1)
 
 
-def digits_in_order(text: str, sequence: list) -> bool:
+def digits_in_order(text: str, sequence: list, max_edit_distance: int = 1) -> bool:
+    """Check whether the target digit sequence appears (possibly among other
+    noise digits, e.g. mis-heard extra digits) in the right order, tolerating
+    up to `max_edit_distance` insertions/deletions/substitutions to account
+    for imperfect speech-to-text transcription."""
     spoken_digits = [ch for ch in text if ch.isdigit()]
-    return spoken_digits == sequence
+
+    # Exact match
+    if spoken_digits == sequence:
+        return True
+
+    # Sequence appears as a contiguous run somewhere in the spoken digits
+    n = len(sequence)
+    for i in range(len(spoken_digits) - n + 1):
+        if spoken_digits[i:i + n] == sequence:
+            return True
+
+    # Fuzzy match: allow a small edit distance against the closest-length window
+    matcher = difflib.SequenceMatcher(None, spoken_digits, sequence)
+    # ratio-based leniency: if the two lists are "close enough", accept it
+    if spoken_digits:
+        opcodes = matcher.get_opcodes()
+        edits = sum(1 for tag, *_ in opcodes if tag != "equal")
+        if edits <= max_edit_distance:
+            return True
+
+    return False
 
 
 def contains_any(text: str, keywords: list) -> bool:
     text_l = text.lower()
     return any(k.lower() in text_l for k in keywords)
+
+
+def attempted(widget_key: str) -> bool:
+    """True if the user actually recorded + got a non-empty transcription for
+    this widget (as opposed to simply never having answered it)."""
+    return bool(st.session_state.get(f"{widget_key}_text"))
 
 
 def voice_input(label: str, key: str):
@@ -395,11 +432,21 @@ st.write("---")
 st.subheader(T("sec5_header"))
 ctx = current_context()
 
+
+def _year_match(ans: str) -> bool:
+    ans_l = ans.lower()
+    if str(ctx["year"]) in ans_l:
+        return True
+    # tolerate people saying just the last two digits of the year
+    last_two = str(ctx["year"])[-2:]
+    return bool(last_two) and last_two in ans_l
+
+
 ori_time_qs = [
     ("ori_day_q", "ori_day_name", lambda a: ctx["weekday"].replace("วัน", "").lower() in a.lower(), ctx["weekday"]),
     ("ori_date_q", "ori_date", lambda a: str(ctx["day"]) in a, ctx["day"]),
     ("ori_month_q", "ori_month", lambda a: ctx["month"].lower() in a.lower(), ctx["month"]),
-    ("ori_year_q", "ori_year", lambda a: str(ctx["year"]) in a, ctx["year"]),
+    ("ori_year_q", "ori_year", _year_match, ctx["year"]),
     ("ori_season_q", "ori_season", lambda a: ctx["season"].replace("ฤดู", "").lower() in a.lower(), ctx["season"]),
 ]
 for label_key, key, check_fn, truth in ori_time_qs:
@@ -559,107 +606,107 @@ st.write("---")
 # SCORING
 # ─────────────────────────────────────────────
 if st.button(T("calc_score_btn")):
-    score = 0
+    score = 0.0
+    possible = 0.0
     details = []
+    attempted_items = 0
+    total_items = 0
 
+    def add_partial(label: str, earned: float, max_points: float, widget_key: str):
+        global score, possible, attempted_items, total_items
+        total_items += 1
+        if not attempted(widget_key):
+            details.append(f"{T('not_attempted')} — {label}")
+            return
+        attempted_items += 1
+        possible += max_points
+        score += earned
+        icon = "✅" if earned >= max_points else ("➖" if earned > 0 else "❌")
+        details.append(f"{icon} {label}: {earned}/{max_points}")
+
+    def add_result(label: str, ok: bool, widget_key: str, points: float = 1):
+        add_partial(label, points if ok else 0, points, widget_key)
+
+    # 1B. Immediate recall
     imm = st.session_state.get("immediate_recall_count", 0)
-    score += imm
-    details.append(f"🧠 {T('sec1b_header')}: {imm}/{len(WORDS)}")
+    add_partial(T("sec1b_header"), imm, len(WORDS), "immediate_recall")
 
-    if st.session_state.get("fwd_ok"):
-        score += 1
-        details.append(f"✅ {T('fwd_label')}")
-    else:
-        details.append(f"❌ {T('fwd_label')}")
+    # 2. Attention
+    add_result(T("fwd_label"), st.session_state.get("fwd_ok", False), "fwd")
+    add_result(T("bwd_label"), st.session_state.get("bwd_ok", False), "bwd")
 
-    if st.session_state.get("bwd_ok"):
-        score += 1
-        details.append(f"✅ {T('bwd_label')}")
-    else:
-        details.append(f"❌ {T('bwd_label')}")
-
+    # 3. Language repetition
     for i in range(1, 5):
         s = st.session_state.get(f"lang{i}_score", 0.0)
         label = T("sentence_label").format(n=i)
-        if s >= 0.6:
-            score += 1
-            details.append(f"✅ {label} {s:.0%}")
-        else:
-            details.append(f"❌ {label} {s:.0%}")
+        add_result(label, s >= 0.6, f"lang{i}")
 
+    # 4. Abstraction
     for i in range(1, 5):
-        if st.session_state.get(f"abs{i}_correct"):
-            score += 1
-            details.append(f"✅ {T('sec4_header')} #{i}")
-        else:
-            details.append(f"❌ {T('sec4_header')} #{i}")
+        label = f"{T('sec4_header')} #{i}"
+        add_result(label, st.session_state.get(f"abs{i}_correct", False), f"abs{i}_widget")
 
-    ori_time_keys = ["ori_day_name_ok", "ori_date_ok", "ori_month_ok", "ori_year_ok", "ori_season_ok"]
-    for key in ori_time_keys:
-        if st.session_state.get(key):
-            score += 1
-            details.append(f"✅ {T('sec5_header')} ({key})")
-        else:
-            details.append(f"❌ {T('sec5_header')} ({key})")
+    # 5. Orientation to time
+    for label_key, key, _check_fn, _truth in ori_time_qs:
+        add_result(T(label_key), st.session_state.get(f"{key}_ok", False), key)
 
-    place_keys = ["ori_country_answered", "ori_province_answered", "ori_place_answered",
-                  "ori_floor_answered", "ori_city_answered"]
-    for key in place_keys:
-        if st.session_state.get(key):
+    # 6. Orientation to place (self-report; credited for answering, flagged for human review)
+    for label_key, key in place_qs:
+        label = f"{T(label_key)}"
+        if attempted(key):
+            attempted_items += 1
+            total_items += 1
+            possible += 1
             score += 1
-            details.append(f"✅ {T('sec6_header')} ({key})")
+            details.append(f"✅ {label} (recorded — please verify)")
         else:
-            details.append(f"❌ {T('sec6_header')} ({key})")
+            total_items += 1
+            details.append(f"{T('not_attempted')} — {label}")
 
-    for key in ["fluency_animals_count", "fluency_fruits_count"]:
-        count = st.session_state.get(key, 0)
-        if count >= 8:
-            score += 1
-            details.append(f"✅ {T('sec7_header')} ({key}): {count}")
-        else:
-            details.append(f"❌ {T('sec7_header')} ({key}): {count}")
+    # 7. Verbal fluency
+    add_result(T("fluency_animals_q"), st.session_state.get("fluency_animals_count", 0) >= 8, "fluency_animals")
+    add_result(T("fluency_fruits_q"), st.session_state.get("fluency_fruits_count", 0) >= 8, "fluency_fruits")
 
+    # 8. Calculation
     calc_correct = st.session_state.get("calc_correct_count", 0)
-    score += calc_correct
-    details.append(f"🧮 {T('sec8_header')}: {calc_correct}/5")
+    add_partial(T("sec8_header"), calc_correct, 5, "calc_serial7")
 
-    for key in ["naming_watch_ok", "naming_pen_ok", "naming_dog_ok"]:
-        if st.session_state.get(key):
-            score += 1
-            details.append(f"✅ {T('sec9_header')} ({key})")
-        else:
-            details.append(f"❌ {T('sec9_header')} ({key})")
+    # 9. Naming
+    for label_key, key, _kw in naming_qs:
+        add_result(T(label_key), st.session_state.get(f"{key}_ok", False), key)
 
-    for key in ["func_hammer_ok", "func_scissors_ok"]:
-        if st.session_state.get(key):
-            score += 1
-            details.append(f"✅ {T('sec10_header')} ({key})")
-        else:
-            details.append(f"❌ {T('sec10_header')} ({key})")
+    # 10. Functional description
+    for label_key, key, _kw in func_qs:
+        add_result(T(label_key), st.session_state.get(f"{key}_ok", False), key)
 
-    for key in ["proverb_water_ok", "proverb_slow_ok"]:
-        if st.session_state.get(key):
-            score += 1
-            details.append(f"✅ {T('sec11_header')} ({key})")
-        else:
-            details.append(f"❌ {T('sec11_header')} ({key})")
+    # 11. Proverbs
+    for label_key, key, _kw in proverb_qs:
+        add_result(T(label_key), st.session_state.get(f"{key}_ok", False), key)
 
+    # 12. Delayed recall
     found = st.session_state.get("recall_score_count", 0)
-    score += found
-    details.append(f"🧠 {T('sec12_header')}: {found}/{len(WORDS)}")
+    add_partial(T("sec12_header"), found, len(WORDS), "recall_widget")
 
     st.subheader(T("results_header"))
     for d in details:
         st.write(d)
 
-    max_score = len(WORDS) + 2 + 4 + 4 + 5 + 5 + 2 + 5 + 3 + 2 + 2 + len(WORDS)
-    st.write(f"{T('total_score')} {score} / {max_score}**")
+    if total_items:
+        coverage = attempted_items / total_items
+        if coverage < 1.0:
+            st.info(T("coverage_warning").format(done=attempted_items, total=total_items))
 
-    if score >= int(max_score * 0.7):
-        st.success(T("good"))
-    elif score >= int(max_score * 0.4):
-        st.warning(T("mild"))
+    if possible > 0:
+        pct_final = score / possible
+        st.write(f"{T('score_on_attempted')} {score:.1f} / {possible:.0f}** ({pct_final:.0%})")
+
+        if pct_final >= 0.7:
+            st.success(T("good"))
+        elif pct_final >= 0.4:
+            st.warning(T("mild"))
+        else:
+            st.error(T("review"))
     else:
-        st.error(T("review"))
+        st.warning(T("coverage_warning").format(done=0, total=total_items))
 
     st.caption(T("disclaimer"))
