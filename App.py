@@ -3,7 +3,18 @@ import speech_recognition as sr
 import tempfile
 import os
 import datetime
-import difflib
+import numpy as np
+import pandas as pd
+
+# Optional heavy deps for the Explainable AI (SHAP) section.
+# Install with: pip install librosa shap scikit-learn soundfile
+try:
+    import librosa
+    import shap
+    from sklearn.ensemble import RandomForestClassifier
+    XAI_AVAILABLE = True
+except ImportError:
+    XAI_AVAILABLE = False
 
 # ─────────────────────────────────────────────
 # LANGUAGE SELECTION (must happen first)
@@ -161,12 +172,6 @@ STR = {
     "review": ("🔴 ควรได้รับการตรวจประเมินเพิ่มเติม (ต้นแบบ/Prototype)", "🔴 Needs review (prototype)"),
     "disclaimer": ("⚠️ นี่ไม่ใช่เครื่องมือวินิจฉัยทางการแพทย์ กรุณาปรึกษาแพทย์ผู้เชี่ยวชาญเพื่อการวินิจฉัยที่ถูกต้อง",
                     "⚠️ Not a medical diagnosis tool. Please consult a qualified professional for an accurate diagnosis."),
-    "not_attempted": ("⚪ ยังไม่ได้ตอบ", "⚪ Not attempted"),
-    "coverage_warning": (
-        "⚠️ คุณตอบเพียง {done}/{total} ส่วนของแบบทดสอบ ผลลัพธ์นี้อาจไม่สะท้อนภาพรวมที่แม่นยำ กรุณาทำแบบทดสอบให้ครบทุกส่วนเพื่อผลลัพธ์ที่น่าเชื่อถือมากขึ้น",
-        "⚠️ You only completed {done}/{total} parts of this test. This result may not be reliable — please complete more sections for an accurate screening.",
-    ),
-    "score_on_attempted": ("**คะแนน (จากส่วนที่ตอบแล้ว):", "**Score (of sections attempted):"),
 }
 
 # ─────────────────────────────────────────────
@@ -282,44 +287,14 @@ def similarity_score(spoken: str, reference: str) -> float:
     return matches / max(len(reference.split()), 1)
 
 
-def digits_in_order(text: str, sequence: list, max_edit_distance: int = 1) -> bool:
-    """Check whether the target digit sequence appears (possibly among other
-    noise digits, e.g. mis-heard extra digits) in the right order, tolerating
-    up to `max_edit_distance` insertions/deletions/substitutions to account
-    for imperfect speech-to-text transcription."""
+def digits_in_order(text: str, sequence: list) -> bool:
     spoken_digits = [ch for ch in text if ch.isdigit()]
-
-    # Exact match
-    if spoken_digits == sequence:
-        return True
-
-    # Sequence appears as a contiguous run somewhere in the spoken digits
-    n = len(sequence)
-    for i in range(len(spoken_digits) - n + 1):
-        if spoken_digits[i:i + n] == sequence:
-            return True
-
-    # Fuzzy match: allow a small edit distance against the closest-length window
-    matcher = difflib.SequenceMatcher(None, spoken_digits, sequence)
-    # ratio-based leniency: if the two lists are "close enough", accept it
-    if spoken_digits:
-        opcodes = matcher.get_opcodes()
-        edits = sum(1 for tag, *_ in opcodes if tag != "equal")
-        if edits <= max_edit_distance:
-            return True
-
-    return False
+    return spoken_digits == sequence
 
 
 def contains_any(text: str, keywords: list) -> bool:
     text_l = text.lower()
     return any(k.lower() in text_l for k in keywords)
-
-
-def attempted(widget_key: str) -> bool:
-    """True if the user actually recorded + got a non-empty transcription for
-    this widget (as opposed to simply never having answered it)."""
-    return bool(st.session_state.get(f"{widget_key}_text"))
 
 
 def voice_input(label: str, key: str):
@@ -334,6 +309,109 @@ def voice_input(label: str, key: str):
             if result is None:
                 st.error(T("transcribe_error"))
     return st.session_state.get(f"{key}_text", "")
+
+
+# ─────────────────────────────────────────────
+# EXPLAINABLE AI (SHAP) HELPERS
+# ─────────────────────────────────────────────
+FEATURE_NAMES = [
+    "pitch_mean", "pitch_std", "jitter", "shimmer",
+    "energy_mean", "zero_crossing_rate", "mfcc_mean", "speech_rate",
+]
+
+FEATURE_LABELS = {
+    "pitch_mean": ("ระดับเสียงเฉลี่ย (Pitch เฉลี่ย)", "Mean pitch (F0)"),
+    "pitch_std": ("ความแปรปรวนของระดับเสียง", "Pitch variability"),
+    "jitter": ("ความสั่นของความถี่เสียง (Jitter)", "Jitter (frequency perturbation)"),
+    "shimmer": ("ความสั่นของความดังเสียง (Shimmer)", "Shimmer (amplitude perturbation)"),
+    "energy_mean": ("พลังงานเสียงเฉลี่ย", "Mean energy (RMS)"),
+    "zero_crossing_rate": ("อัตราการตัดผ่านศูนย์ (ความคมของเสียง)", "Zero-crossing rate"),
+    "mfcc_mean": ("ค่าเฉลี่ย MFCC (ลักษณะเสียงพูด)", "Mean MFCC (timbre)"),
+    "speech_rate": ("อัตราความเร็วในการพูด", "Speech rate (words/sec)"),
+}
+
+
+def extract_acoustic_features(audio_bytes: bytes, transcript: str = "") -> dict | None:
+    """Extract simple acoustic features from a recorded voice clip using librosa."""
+    if not XAI_AVAILABLE:
+        return None
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
+        f.write(audio_bytes)
+        path = f.name
+    try:
+        y, srate = librosa.load(path, sr=16000)
+        duration = max(librosa.get_duration(y=y, sr=srate), 0.01)
+
+        f0, _, _ = librosa.pyin(
+            y, fmin=librosa.note_to_hz("C2"), fmax=librosa.note_to_hz("C7")
+        )
+        f0_voiced = f0[~np.isnan(f0)] if f0 is not None else np.array([])
+        pitch_mean = float(np.mean(f0_voiced)) if len(f0_voiced) else 0.0
+        pitch_std = float(np.std(f0_voiced)) if len(f0_voiced) else 0.0
+        if len(f0_voiced) > 1:
+            periods = 1.0 / f0_voiced
+            jitter = float(np.mean(np.abs(np.diff(periods))) / np.mean(periods))
+        else:
+            jitter = 0.0
+
+        rms = librosa.feature.rms(y=y)[0]
+        energy_mean = float(np.mean(rms))
+        shimmer = float(np.std(rms) / np.mean(rms)) if np.mean(rms) > 0 else 0.0
+        zcr = float(np.mean(librosa.feature.zero_crossing_rate(y)[0]))
+        mfcc = librosa.feature.mfcc(y=y, sr=srate, n_mfcc=13)
+        mfcc_mean = float(np.mean(mfcc))
+        word_count = len(transcript.split()) if transcript else 0
+        speech_rate = word_count / duration
+
+        return {
+            "pitch_mean": pitch_mean, "pitch_std": pitch_std, "jitter": jitter,
+            "shimmer": shimmer, "energy_mean": energy_mean, "zero_crossing_rate": zcr,
+            "mfcc_mean": mfcc_mean, "speech_rate": speech_rate,
+        }
+    except Exception as e:
+        st.error(f"Feature extraction failed: {e}")
+        return None
+    finally:
+        os.unlink(path)
+
+
+@st.cache_resource
+def train_demo_model():
+    """
+    Trains a small RandomForest on SYNTHETIC data as a demonstration model.
+    This is NOT trained on real clinical data and NOT validated — it exists purely
+    to illustrate how SHAP-based explainability could work once a real labeled
+    Thai speech dataset is available (see the data-collection guideline below).
+    """
+    rng = np.random.default_rng(42)
+    n = 300
+    # "typical" class: higher pitch stability, faster/more regular speech
+    typical = {
+        "pitch_mean": rng.normal(180, 20, n // 2),
+        "pitch_std": rng.normal(15, 4, n // 2),
+        "jitter": rng.normal(0.01, 0.004, n // 2),
+        "shimmer": rng.normal(0.05, 0.015, n // 2),
+        "energy_mean": rng.normal(0.05, 0.01, n // 2),
+        "zero_crossing_rate": rng.normal(0.08, 0.02, n // 2),
+        "mfcc_mean": rng.normal(0, 5, n // 2),
+        "speech_rate": rng.normal(2.5, 0.4, n // 2),
+    }
+    # "possible concern" class: more jitter/shimmer, slower & more variable speech
+    concern = {
+        "pitch_mean": rng.normal(170, 25, n // 2),
+        "pitch_std": rng.normal(25, 6, n // 2),
+        "jitter": rng.normal(0.025, 0.008, n // 2),
+        "shimmer": rng.normal(0.09, 0.02, n // 2),
+        "energy_mean": rng.normal(0.035, 0.012, n // 2),
+        "zero_crossing_rate": rng.normal(0.07, 0.02, n // 2),
+        "mfcc_mean": rng.normal(-2, 5, n // 2),
+        "speech_rate": rng.normal(1.6, 0.4, n // 2),
+    }
+    X = pd.DataFrame({k: np.concatenate([typical[k], concern[k]]) for k in FEATURE_NAMES})
+    y = np.array([0] * (n // 2) + [1] * (n // 2))
+    model = RandomForestClassifier(n_estimators=150, max_depth=5, random_state=42)
+    model.fit(X, y)
+    return model, X
 
 
 st.title(T("title"))
@@ -432,21 +510,11 @@ st.write("---")
 st.subheader(T("sec5_header"))
 ctx = current_context()
 
-
-def _year_match(ans: str) -> bool:
-    ans_l = ans.lower()
-    if str(ctx["year"]) in ans_l:
-        return True
-    # tolerate people saying just the last two digits of the year
-    last_two = str(ctx["year"])[-2:]
-    return bool(last_two) and last_two in ans_l
-
-
 ori_time_qs = [
     ("ori_day_q", "ori_day_name", lambda a: ctx["weekday"].replace("วัน", "").lower() in a.lower(), ctx["weekday"]),
     ("ori_date_q", "ori_date", lambda a: str(ctx["day"]) in a, ctx["day"]),
     ("ori_month_q", "ori_month", lambda a: ctx["month"].lower() in a.lower(), ctx["month"]),
-    ("ori_year_q", "ori_year", _year_match, ctx["year"]),
+    ("ori_year_q", "ori_year", lambda a: str(ctx["year"]) in a, ctx["year"]),
     ("ori_season_q", "ori_season", lambda a: ctx["season"].replace("ฤดู", "").lower() in a.lower(), ctx["season"]),
 ]
 for label_key, key, check_fn, truth in ori_time_qs:
@@ -603,110 +671,271 @@ if recall:
 st.write("---")
 
 # ─────────────────────────────────────────────
+# 13. EXPLAINABLE AI — SHAP FEATURE ANALYSIS
+# ─────────────────────────────────────────────
+st.subheader(
+    "13. วิเคราะห์คุณลักษณะเสียงด้วย Explainable AI (SHAP)"
+    if LANG == "th" else
+    "13. Explainable AI: Which Voice Features Drive the Result (SHAP)"
+)
+st.caption(
+    "⚠️ โมเดลนี้เป็นเพียงต้นแบบสาธิต ฝึกด้วยข้อมูลสังเคราะห์ (synthetic data) ไม่ใช่ข้อมูลผู้ป่วยจริง "
+    "ผลลัพธ์นี้ใช้เพื่อสาธิตแนวทางการอธิบายผลเท่านั้น ไม่ใช่การวินิจฉัย"
+    if LANG == "th" else
+    "⚠️ This model is only a demonstration prototype trained on synthetic data, not real patient "
+    "data. Results illustrate how explainability could work — this is not a diagnosis."
+)
+
+if not XAI_AVAILABLE:
+    st.warning(
+        "ต้องติดตั้งไลบรารีเพิ่มเติมก่อนใช้งานส่วนนี้: `pip install librosa shap scikit-learn soundfile`"
+        if LANG == "th" else
+        "Install extra libraries to use this section: `pip install librosa shap scikit-learn soundfile`"
+    )
+else:
+    # Prefer the delayed-recall clip; fall back to any other recorded clip in this session.
+    candidate_keys = ["recall_widget", "immediate_recall", "lang1", "lang2", "fwd", "bwd"]
+    chosen_key, chosen_bytes, chosen_text = None, None, ""
+    for k in candidate_keys:
+        b = st.session_state.get(f"{k}_bytes")
+        if b:
+            chosen_key, chosen_bytes = k, b
+            chosen_text = st.session_state.get(f"{k}_text", "")
+            break
+
+    if chosen_bytes is None:
+        st.info(
+            "บันทึกคำตอบด้วยเสียงอย่างน้อยหนึ่งข้อด้านบนก่อน จึงจะวิเคราะห์ได้"
+            if LANG == "th" else
+            "Record at least one voice answer above before running this analysis."
+        )
+    else:
+        if st.button(
+            "🔍 วิเคราะห์คุณลักษณะเสียง (Run SHAP Analysis)"
+            if LANG == "th" else
+            "🔍 Run SHAP Analysis"
+        ):
+            with st.spinner("กำลังสกัดคุณลักษณะเสียงและคำนวณ SHAP…" if LANG == "th" else "Extracting features and computing SHAP…"):
+                feats = extract_acoustic_features(chosen_bytes, chosen_text)
+                if feats is not None:
+                    model, X_train = train_demo_model()
+                    x_user = pd.DataFrame([feats])[FEATURE_NAMES]
+                    proba = model.predict_proba(x_user)[0][1]
+
+                    explainer = shap.TreeExplainer(model)
+                    sv = explainer.shap_values(x_user)
+                    # sv can be a list (per-class) or a single array depending on sklearn/shap version
+                    if isinstance(sv, list):
+                        shap_vals = sv[1][0]
+                    else:
+                        shap_vals = sv[0]
+
+                    label_idx = 0 if LANG == "th" else 1
+                    labels = [FEATURE_LABELS[f][label_idx] for f in FEATURE_NAMES]
+                    shap_series = pd.Series(shap_vals, index=labels).sort_values()
+
+                    st.write(
+                        f"**ความน่าจะเป็นของกลุ่ม 'ควรตรวจเพิ่มเติม' (ต้นแบบสาธิต):** {proba:.0%}"
+                        if LANG == "th" else
+                        f"**Model's estimated probability of the 'possible concern' group (demo only):** {proba:.0%}"
+                    )
+                    st.bar_chart(shap_series)
+                    st.caption(
+                        "แท่งที่ยื่นไปทางขวา = คุณลักษณะนั้นดันผลไปทาง 'ควรตรวจเพิ่มเติม' / "
+                        "แท่งที่ยื่นไปทางซ้าย = ดันผลไปทาง 'ปกติ' — ยิ่งแท่งยาว ยิ่งมีผลมาก"
+                        if LANG == "th" else
+                        "Bars pointing right push the result toward 'possible concern'; bars pointing "
+                        "left push toward 'typical'. Longer bars = more influence on this prediction."
+                    )
+                    with st.expander("ดูค่าคุณลักษณะดิบ (Raw feature values)"):
+                        st.dataframe(pd.DataFrame([feats]).T.rename(columns={0: "value"}))
+
+st.write("---")
+
+# ─────────────────────────────────────────────
+# 14. GUIDELINE: COLLECTING A THAI SPEECH DATASET FOR FUTURE RESEARCH
+# ─────────────────────────────────────────────
+st.subheader(
+    "14. แนวทางการเก็บชุดข้อมูลเสียงพูดภาษาไทยสำหรับงานวิจัยในอนาคต"
+    if LANG == "th" else
+    "14. Guideline: Collecting a Thai Speech Dataset for Future Research"
+)
+
+with st.expander(
+    "อ่านแนวทางฉบับเต็ม" if LANG == "th" else "Read the full guideline", expanded=False
+):
+    if LANG == "th":
+        st.markdown("""
+**1. จริยธรรมและความยินยอม**
+- ขอความยินยอมที่เป็นลายลักษณ์อักษร (informed consent) จากผู้เข้าร่วมหรือผู้ดูแลตามกฎหมาย
+- ผ่านการรับรองจากคณะกรรมการจริยธรรมการวิจัยในมนุษย์ (IRB/EC) ของสถาบัน
+- ปฏิบัติตาม พ.ร.บ. คุ้มครองข้อมูลส่วนบุคคล (PDPA) อย่างเคร่งครัด โดยเฉพาะข้อมูลสุขภาพซึ่งจัดเป็นข้อมูลอ่อนไหว
+
+**2. ความหลากหลายของกลุ่มตัวอย่าง**
+- ครอบคลุมช่วงอายุ เพศ ระดับการศึกษา และภูมิภาค (ภาคเหนือ ภาคอีสาน ภาคใต้ ภาคกลาง) เพื่อให้ครอบคลุมสำเนียงถิ่น
+- เก็บทั้งกลุ่มปกติและกลุ่มที่ได้รับการวินิจฉัยแล้ว (เช่น MCI, Alzheimer's) โดยแพทย์ผู้เชี่ยวชาญ เพื่อใช้เป็น ground truth
+- ควบคุมสัดส่วนเพศ/อายุระหว่างกลุ่มให้ใกล้เคียงกัน (matched design) เพื่อลด confounding
+
+**3. โปรโตคอลการบันทึกเสียง**
+- ใช้ไมโครโฟนและอัตราสุ่มสัญญาณเสียง (sampling rate) มาตรฐานเดียวกันทุกจุดเก็บข้อมูล (แนะนำ ≥16kHz, 16-bit)
+- บันทึกในสภาพแวดล้อมที่ควบคุมเสียงรบกวนพื้นหลัง หรืออย่างน้อยบันทึกระดับเสียงรบกวนไว้เป็น metadata
+- ออกแบบชุดงาน (task) ให้หลากหลาย เช่น การอ่านออกเสียง การพูดต่อเนื่องแบบอิสระ (spontaneous speech) การทวนประโยค การนับเลขถอยหลัง และคำอธิบายภาพ เพื่อดึงลักษณะเสียงที่ต่างกัน
+
+**4. การติดป้ายกำกับข้อมูล (Labeling)**
+- เชื่อมโยงกับผลตรวจทางคลินิกมาตรฐาน เช่น MMSE, MoCA, CDR ที่ประเมินโดยแพทย์
+- บันทึกวันที่ประเมิน และระยะเวลาห่างจากการบันทึกเสียง เพื่อความถูกต้องของ label
+- พิจารณาการเก็บข้อมูลระยะยาว (longitudinal) เพื่อดูการเปลี่ยนแปลงของเสียงพูดตามระยะเวลา
+
+**5. การจัดการและความเป็นส่วนตัวของข้อมูล**
+- จัดเก็บไฟล์เสียงและข้อมูลระบุตัวตนแยกจากกัน (de-identification) พร้อมระบบเข้ารหัส
+- กำหนดสิทธิ์การเข้าถึงข้อมูลเฉพาะทีมวิจัยที่เกี่ยวข้อง และมีบันทึกการเข้าถึง (access log)
+- วางแผนระยะเวลาการเก็บรักษาและการทำลายข้อมูลตามนโยบายของสถาบันและกฎหมาย
+
+**6. คุณภาพและ Metadata**
+- บันทึก metadata ครบถ้วน เช่น อุปกรณ์บันทึก อายุ เพศ ระดับการศึกษา สำเนียง โรคประจำตัวที่เกี่ยวข้อง ยาที่ใช้
+- ตรวจสอบคุณภาพเสียง (SNR, clipping) ก่อนนำเข้าสู่ชุดข้อมูลหลัก
+- เตรียมชุดข้อมูลสำหรับ train/validation/test แยกตามผู้พูด (speaker-independent split) เพื่อป้องกัน data leakage
+""")
+    else:
+        st.markdown("""
+**1. Ethics and Consent**
+- Obtain written informed consent from participants (or legal guardians where applicable)
+- Secure approval from an Institutional Review Board / Ethics Committee
+- Comply with Thailand's PDPA (Personal Data Protection Act), treating health data as sensitive data
+
+**2. Sample Diversity**
+- Cover a range of ages, genders, education levels, and regions (North, Northeast, South, Central) to capture dialectal variation
+- Include both cognitively typical participants and clinically diagnosed participants (e.g., MCI, Alzheimer's) confirmed by specialists, to serve as ground truth
+- Match age/gender distribution across groups where possible to reduce confounding
+
+**3. Recording Protocol**
+- Use a consistent microphone setup and sampling rate across all collection sites (recommend ≥16kHz, 16-bit)
+- Record in an environment with controlled background noise, or log ambient noise level as metadata
+- Design varied elicitation tasks: reading aloud, spontaneous speech, sentence repetition, backward counting, and picture description, to capture different acoustic characteristics
+
+**4. Labeling**
+- Link each recording to standardized clinical assessments (MMSE, MoCA, CDR) scored by a clinician
+- Record the assessment date and its gap from the recording date for label accuracy
+- Consider longitudinal collection to track how speech changes over time
+
+**5. Data Management and Privacy**
+- Store audio separately from identifying information (de-identification), with encryption
+- Restrict access to the research team only, with an access log
+- Define a retention and deletion policy in line with institutional and legal requirements
+
+**6. Quality and Metadata**
+- Record complete metadata: recording device, age, gender, education, dialect/accent, relevant conditions, medications
+- Check audio quality (SNR, clipping) before inclusion in the main dataset
+- Use a speaker-independent train/validation/test split to prevent data leakage
+""")
+
+st.write("---")
+
+# ─────────────────────────────────────────────
 # SCORING
 # ─────────────────────────────────────────────
 if st.button(T("calc_score_btn")):
-    score = 0.0
-    possible = 0.0
+    score = 0
     details = []
-    attempted_items = 0
-    total_items = 0
 
-    def add_partial(label: str, earned: float, max_points: float, widget_key: str):
-        global score, possible, attempted_items, total_items
-        total_items += 1
-        if not attempted(widget_key):
-            details.append(f"{T('not_attempted')} — {label}")
-            return
-        attempted_items += 1
-        possible += max_points
-        score += earned
-        icon = "✅" if earned >= max_points else ("➖" if earned > 0 else "❌")
-        details.append(f"{icon} {label}: {earned}/{max_points}")
-
-    def add_result(label: str, ok: bool, widget_key: str, points: float = 1):
-        add_partial(label, points if ok else 0, points, widget_key)
-
-    # 1B. Immediate recall
     imm = st.session_state.get("immediate_recall_count", 0)
-    add_partial(T("sec1b_header"), imm, len(WORDS), "immediate_recall")
+    score += imm
+    details.append(f"🧠 {T('sec1b_header')}: {imm}/{len(WORDS)}")
 
-    # 2. Attention
-    add_result(T("fwd_label"), st.session_state.get("fwd_ok", False), "fwd")
-    add_result(T("bwd_label"), st.session_state.get("bwd_ok", False), "bwd")
+    if st.session_state.get("fwd_ok"):
+        score += 1
+        details.append(f"✅ {T('fwd_label')}")
+    else:
+        details.append(f"❌ {T('fwd_label')}")
 
-    # 3. Language repetition
+    if st.session_state.get("bwd_ok"):
+        score += 1
+        details.append(f"✅ {T('bwd_label')}")
+    else:
+        details.append(f"❌ {T('bwd_label')}")
+
     for i in range(1, 5):
         s = st.session_state.get(f"lang{i}_score", 0.0)
         label = T("sentence_label").format(n=i)
-        add_result(label, s >= 0.6, f"lang{i}")
-
-    # 4. Abstraction
-    for i in range(1, 5):
-        label = f"{T('sec4_header')} #{i}"
-        add_result(label, st.session_state.get(f"abs{i}_correct", False), f"abs{i}_widget")
-
-    # 5. Orientation to time
-    for label_key, key, _check_fn, _truth in ori_time_qs:
-        add_result(T(label_key), st.session_state.get(f"{key}_ok", False), key)
-
-    # 6. Orientation to place (self-report; credited for answering, flagged for human review)
-    for label_key, key in place_qs:
-        label = f"{T(label_key)}"
-        if attempted(key):
-            attempted_items += 1
-            total_items += 1
-            possible += 1
+        if s >= 0.6:
             score += 1
-            details.append(f"✅ {label} (recorded — please verify)")
+            details.append(f"✅ {label} {s:.0%}")
         else:
-            total_items += 1
-            details.append(f"{T('not_attempted')} — {label}")
+            details.append(f"❌ {label} {s:.0%}")
 
-    # 7. Verbal fluency
-    add_result(T("fluency_animals_q"), st.session_state.get("fluency_animals_count", 0) >= 8, "fluency_animals")
-    add_result(T("fluency_fruits_q"), st.session_state.get("fluency_fruits_count", 0) >= 8, "fluency_fruits")
+    for i in range(1, 5):
+        if st.session_state.get(f"abs{i}_correct"):
+            score += 1
+            details.append(f"✅ {T('sec4_header')} #{i}")
+        else:
+            details.append(f"❌ {T('sec4_header')} #{i}")
 
-    # 8. Calculation
+    ori_time_keys = ["ori_day_name_ok", "ori_date_ok", "ori_month_ok", "ori_year_ok", "ori_season_ok"]
+    for key in ori_time_keys:
+        if st.session_state.get(key):
+            score += 1
+            details.append(f"✅ {T('sec5_header')} ({key})")
+        else:
+            details.append(f"❌ {T('sec5_header')} ({key})")
+
+    place_keys = ["ori_country_answered", "ori_province_answered", "ori_place_answered",
+                  "ori_floor_answered", "ori_city_answered"]
+    for key in place_keys:
+        if st.session_state.get(key):
+            score += 1
+            details.append(f"✅ {T('sec6_header')} ({key})")
+        else:
+            details.append(f"❌ {T('sec6_header')} ({key})")
+
+    for key in ["fluency_animals_count", "fluency_fruits_count"]:
+        count = st.session_state.get(key, 0)
+        if count >= 8:
+            score += 1
+            details.append(f"✅ {T('sec7_header')} ({key}): {count}")
+        else:
+            details.append(f"❌ {T('sec7_header')} ({key}): {count}")
+
     calc_correct = st.session_state.get("calc_correct_count", 0)
-    add_partial(T("sec8_header"), calc_correct, 5, "calc_serial7")
+    score += calc_correct
+    details.append(f"🧮 {T('sec8_header')}: {calc_correct}/5")
 
-    # 9. Naming
-    for label_key, key, _kw in naming_qs:
-        add_result(T(label_key), st.session_state.get(f"{key}_ok", False), key)
+    for key in ["naming_watch_ok", "naming_pen_ok", "naming_dog_ok"]:
+        if st.session_state.get(key):
+            score += 1
+            details.append(f"✅ {T('sec9_header')} ({key})")
+        else:
+            details.append(f"❌ {T('sec9_header')} ({key})")
 
-    # 10. Functional description
-    for label_key, key, _kw in func_qs:
-        add_result(T(label_key), st.session_state.get(f"{key}_ok", False), key)
+    for key in ["func_hammer_ok", "func_scissors_ok"]:
+        if st.session_state.get(key):
+            score += 1
+            details.append(f"✅ {T('sec10_header')} ({key})")
+        else:
+            details.append(f"❌ {T('sec10_header')} ({key})")
 
-    # 11. Proverbs
-    for label_key, key, _kw in proverb_qs:
-        add_result(T(label_key), st.session_state.get(f"{key}_ok", False), key)
+    for key in ["proverb_water_ok", "proverb_slow_ok"]:
+        if st.session_state.get(key):
+            score += 1
+            details.append(f"✅ {T('sec11_header')} ({key})")
+        else:
+            details.append(f"❌ {T('sec11_header')} ({key})")
 
-    # 12. Delayed recall
     found = st.session_state.get("recall_score_count", 0)
-    add_partial(T("sec12_header"), found, len(WORDS), "recall_widget")
+    score += found
+    details.append(f"🧠 {T('sec12_header')}: {found}/{len(WORDS)}")
 
     st.subheader(T("results_header"))
     for d in details:
         st.write(d)
 
-    if total_items:
-        coverage = attempted_items / total_items
-        if coverage < 1.0:
-            st.info(T("coverage_warning").format(done=attempted_items, total=total_items))
+    max_score = len(WORDS) + 2 + 4 + 4 + 5 + 5 + 2 + 5 + 3 + 2 + 2 + len(WORDS)
+    st.write(f"{T('total_score')} {score} / {max_score}**")
 
-    if possible > 0:
-        pct_final = score / possible
-        st.write(f"{T('score_on_attempted')} {score:.1f} / {possible:.0f}** ({pct_final:.0%})")
-
-        if pct_final >= 0.7:
-            st.success(T("good"))
-        elif pct_final >= 0.4:
-            st.warning(T("mild"))
-        else:
-            st.error(T("review"))
+    if score >= int(max_score * 0.7):
+        st.success(T("good"))
+    elif score >= int(max_score * 0.4):
+        st.warning(T("mild"))
     else:
-        st.warning(T("coverage_warning").format(done=0, total=total_items))
+        st.error(T("review"))
 
     st.caption(T("disclaimer"))
