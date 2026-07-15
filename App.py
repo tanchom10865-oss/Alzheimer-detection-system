@@ -84,7 +84,7 @@ STR = {
                   "**Forward Digit Span** — say these numbers in the same order:"),
     "bwd_label": ("**ความจำตัวเลขแบบย้อนกลับ** — พูดเลข 7-4-2 โดยเรียงย้อนกลับ:",
                   "**Backward Digit Span** — say 7-4-2 in reverse:"),
-    "bwd_hint": ("ให้พูดว่า: 2 – 4 – 7", "Say: 2 – 4 – 7"),
+   
 
     # Section 3
     "sec3_header": ("3. การทวนประโยค (Language Repetition)", "3. Language Repetition"),
