@@ -10,3 +10,5 @@ soundfile
 scikit-learn
 shap
 anthropic
+librosa
+soundfile
