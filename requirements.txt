@@ -1,4 +1,7 @@
 streamlit
 streamlit-mic-recorder
 SpeechRecognition
-
+   librosa
+   shap
+   scikit-learn
+   soundfile
