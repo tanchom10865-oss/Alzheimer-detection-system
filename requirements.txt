@@ -1,13 +1,4 @@
 streamlit
 streamlit-mic-recorder
 SpeechRecognition
-streamlit
-SpeechRecogniton
-numby
-pandas
-librosa
-soundfile
-scikit-learn
-shap
-anthropic
 
