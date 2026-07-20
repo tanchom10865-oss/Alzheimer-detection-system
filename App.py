@@ -16,6 +16,14 @@ try:
 except ImportError:
     XAI_AVAILABLE = False
 
+# Optional: Claude API for plain-language interpretation of the numeric results.
+# Install with: pip install anthropic
+try:
+    import anthropic
+    ANTHROPIC_SDK_AVAILABLE = True
+except ImportError:
+    ANTHROPIC_SDK_AVAILABLE = False
+
 # ─────────────────────────────────────────────
 # LANGUAGE SELECTION (must happen first)
 # ─────────────────────────────────────────────
@@ -125,8 +133,8 @@ STR = {
 
     # Section 8 (calculation)
     "sec8_header": ("8. การคำนวณ (Calculation)", "8. Calculation"),
-    "calc_q": ("**เริ่มจาก 100 แล้วลบ 7 ไปเรื่อยๆ พูดผลลัพธ์ 5 ค่าติดต่อกัน (เช่น 93, 86, 79, 72, 65)**",
-               "**Starting at 100, keep subtracting 7 and say 5 results in a row (e.g. 93, 86, 79, 72, 65)**"),
+    "calc_q": ("**เริ่มจาก 100 แล้วลบ 7 ไปเรื่อยๆ พูดผลลัพธ์ 5 ค่าติดต่อกัน**",
+               "**Starting at 100, keep subtracting 7 and say 5 results in a row**"),
     "calc_result": ("📊 ถูกต้อง", "📊 Correct:"),
 
     # Section 9 (naming)
@@ -292,8 +300,24 @@ def digits_in_order(text: str, sequence: list) -> bool:
 
 
 def contains_any(text: str, keywords: list) -> bool:
+    """
+    Fallback keyword check (used only when AI grading is unavailable).
+    Matches whole words/phrases with boundaries, not raw substrings — so "cut" won't
+    incorrectly match inside "cutting". Thai has no spaces between words, so plain
+    substring matching is kept for Thai keywords.
+    """
+    import re
     text_l = text.lower()
-    return any(k.lower() in text_l for k in keywords)
+    for k in keywords:
+        k_l = k.lower()
+        if any(ord(ch) > 0x0E00 and ord(ch) < 0x0E7F for ch in k_l):
+            # Thai keyword: no word boundaries available, fall back to substring
+            if k_l in text_l:
+                return True
+        else:
+            if re.search(r"\b" + re.escape(k_l) + r"\b", text_l):
+                return True
+    return False
 
 
 def voice_input(label: str, key: str):
@@ -315,7 +339,8 @@ def voice_input(label: str, key: str):
 # ─────────────────────────────────────────────
 FEATURE_NAMES = [
     "pitch_mean", "pitch_std", "jitter", "shimmer",
-    "energy_mean", "zero_crossing_rate", "mfcc_mean", "speech_rate",
+    "energy_mean", "zero_crossing_rate", "mfcc_mean",
+    "speaking_rate", "pause_duration", "pause_frequency", "vocabulary_diversity",
 ]
 
 FEATURE_LABELS = {
@@ -326,12 +351,15 @@ FEATURE_LABELS = {
     "energy_mean": ("พลังงานเสียงเฉลี่ย", "Mean energy (RMS)"),
     "zero_crossing_rate": ("อัตราการตัดผ่านศูนย์ (ความคมของเสียง)", "Zero-crossing rate"),
     "mfcc_mean": ("ค่าเฉลี่ย MFCC (ลักษณะเสียงพูด)", "Mean MFCC (timbre)"),
-    "speech_rate": ("อัตราความเร็วในการพูด", "Speech rate (words/sec)"),
+    "speaking_rate": ("อัตราความเร็วในการพูด (คำ/นาที)", "Speaking rate (words/min)"),
+    "pause_duration": ("ความยาวเฉลี่ยของการหยุดพูด (วินาที)", "Mean pause duration (sec)"),
+    "pause_frequency": ("ความถี่ของการหยุดพูด (ครั้ง/นาที)", "Pause frequency (pauses/min)"),
+    "vocabulary_diversity": ("ความหลากหลายของคำศัพท์ (Type-Token Ratio)", "Vocabulary diversity (type-token ratio)"),
 }
 
 
 def extract_acoustic_features(audio_bytes: bytes, transcript: str = "") -> dict | None:
-    """Extract simple acoustic features from a recorded voice clip using librosa."""
+    """Extract acoustic + pause + vocabulary features from a recorded voice clip using librosa."""
     if not XAI_AVAILABLE:
         return None
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
@@ -359,13 +387,42 @@ def extract_acoustic_features(audio_bytes: bytes, transcript: str = "") -> dict 
         zcr = float(np.mean(librosa.feature.zero_crossing_rate(y)[0]))
         mfcc = librosa.feature.mfcc(y=y, sr=srate, n_mfcc=13)
         mfcc_mean = float(np.mean(mfcc))
+
+        # ── Pause detection ──
+        # top_db: how many dB below peak counts as silence. Lower = more sensitive to soft pauses.
+        intervals = librosa.effects.split(y, top_db=30)  # array of [start_sample, end_sample] non-silent chunks
+        if len(intervals) > 0:
+            speaking_samples = sum(end - start for start, end in intervals)
+            speaking_duration = speaking_samples / srate
+            # gaps between consecutive non-silent chunks = pauses (ignore leading/trailing silence)
+            pause_lengths = []
+            for i in range(len(intervals) - 1):
+                gap_samples = intervals[i + 1][0] - intervals[i][1]
+                gap_sec = gap_samples / srate
+                if gap_sec > 0.15:  # ignore tiny sub-150ms gaps (not perceptible pauses)
+                    pause_lengths.append(gap_sec)
+            pause_duration = float(np.mean(pause_lengths)) if pause_lengths else 0.0
+            pause_frequency = len(pause_lengths) / (duration / 60.0)  # pauses per minute
+        else:
+            speaking_duration = 0.0
+            pause_duration = 0.0
+            pause_frequency = 0.0
+
         word_count = len(transcript.split()) if transcript else 0
-        speech_rate = word_count / duration
+        # words per minute of actual speaking time (excludes long silences), falls back to total duration
+        effective_time = speaking_duration if speaking_duration > 0.1 else duration
+        speaking_rate = (word_count / effective_time) * 60.0
+
+        # ── Vocabulary diversity: type-token ratio ──
+        words = transcript.lower().split() if transcript else []
+        vocabulary_diversity = (len(set(words)) / len(words)) if words else 0.0
 
         return {
             "pitch_mean": pitch_mean, "pitch_std": pitch_std, "jitter": jitter,
             "shimmer": shimmer, "energy_mean": energy_mean, "zero_crossing_rate": zcr,
-            "mfcc_mean": mfcc_mean, "speech_rate": speech_rate,
+            "mfcc_mean": mfcc_mean, "speaking_rate": speaking_rate,
+            "pause_duration": pause_duration, "pause_frequency": pause_frequency,
+            "vocabulary_diversity": vocabulary_diversity,
         }
     except Exception as e:
         st.error(f"Feature extraction failed: {e}")
@@ -384,7 +441,7 @@ def train_demo_model():
     """
     rng = np.random.default_rng(42)
     n = 300
-    # "typical" class: higher pitch stability, faster/more regular speech
+    # "typical" class: stable pitch, fewer/shorter pauses, faster speech, richer vocabulary
     typical = {
         "pitch_mean": rng.normal(180, 20, n // 2),
         "pitch_std": rng.normal(15, 4, n // 2),
@@ -393,9 +450,13 @@ def train_demo_model():
         "energy_mean": rng.normal(0.05, 0.01, n // 2),
         "zero_crossing_rate": rng.normal(0.08, 0.02, n // 2),
         "mfcc_mean": rng.normal(0, 5, n // 2),
-        "speech_rate": rng.normal(2.5, 0.4, n // 2),
+        "speaking_rate": rng.normal(140, 20, n // 2),
+        "pause_duration": rng.normal(0.4, 0.15, n // 2),
+        "pause_frequency": rng.normal(6, 2, n // 2),
+        "vocabulary_diversity": rng.normal(0.75, 0.08, n // 2),
     }
-    # "possible concern" class: more jitter/shimmer, slower & more variable speech
+    # "possible concern" class: more jitter/shimmer, longer & more frequent pauses,
+    # slower speech, less varied vocabulary (word-finding difficulty)
     concern = {
         "pitch_mean": rng.normal(170, 25, n // 2),
         "pitch_std": rng.normal(25, 6, n // 2),
@@ -404,7 +465,10 @@ def train_demo_model():
         "energy_mean": rng.normal(0.035, 0.012, n // 2),
         "zero_crossing_rate": rng.normal(0.07, 0.02, n // 2),
         "mfcc_mean": rng.normal(-2, 5, n // 2),
-        "speech_rate": rng.normal(1.6, 0.4, n // 2),
+        "speaking_rate": rng.normal(90, 20, n // 2),
+        "pause_duration": rng.normal(0.9, 0.25, n // 2),
+        "pause_frequency": rng.normal(12, 3, n // 2),
+        "vocabulary_diversity": rng.normal(0.55, 0.1, n // 2),
     }
     X = pd.DataFrame({k: np.concatenate([typical[k], concern[k]]) for k in FEATURE_NAMES})
     y = np.array([0] * (n // 2) + [1] * (n // 2))
@@ -413,7 +477,115 @@ def train_demo_model():
     return model, X
 
 
+def get_anthropic_api_key():
+    """Look for the API key in Streamlit secrets first, then environment variables."""
+    try:
+        if "ANTHROPIC_API_KEY" in st.secrets:
+            return st.secrets["ANTHROPIC_API_KEY"]
+    except Exception:
+        pass
+    return os.environ.get("ANTHROPIC_API_KEY")
+
+
+def ai_grade_answer(question_text: str, spoken_answer: str) -> tuple[bool | None, str]:
+    """
+    Uses Claude to judge whether a spoken answer is a reasonable, valid answer to the
+    question — accepting synonyms and alternative correct answers (e.g. "charcoal" for
+    a writing-tool question), not just one expected keyword.
+    Returns (is_correct, note). is_correct is None if Claude is unavailable/unconfigured;
+    the caller should fall back to keyword matching in that case.
+    """
+    if not ANTHROPIC_SDK_AVAILABLE:
+        return None, "sdk_missing"
+    api_key = get_anthropic_api_key()
+    if not api_key:
+        return None, "no_key"
+    if not spoken_answer.strip():
+        return False, "empty"
+    prompt = f"""You are grading one short spoken answer in a voice-based cognitive
+screening quiz. Judge only whether the answer is a reasonable, valid answer to the
+question — accept synonyms, alternative correct answers, and answers in Thai or English,
+not just one single expected word. Be generous with genuinely valid alternatives, but
+reject answers that are simply wrong or unrelated.
+
+Question: "{question_text}"
+Spoken answer: "{spoken_answer}"
+
+Reply with exactly one word first — YES or NO — then a very short reason (under 12 words)."""
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=60,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = response.content[0].text.strip()
+        is_correct = text.upper().startswith("YES")
+        return is_correct, text
+    except Exception as e:
+        return None, str(e)
+
+
+def get_claude_interpretation(feats: dict, transcript: str, proba: float) -> tuple[str | None, str | None]:
+    """
+    Sends the already-computed librosa metrics (not raw audio) + transcript to Claude
+    and asks for a plain-language interpretation. Returns (text, error).
+    """
+    if not ANTHROPIC_SDK_AVAILABLE:
+        return None, "sdk_missing"
+    api_key = get_anthropic_api_key()
+    if not api_key:
+        return None, "no_key"
+
+    lang_instruction = (
+        "ตอบเป็นภาษาไทยเท่านั้น ใช้ภาษาที่เข้าใจง่ายสำหรับผู้ที่ไม่ใช่แพทย์"
+        if LANG == "th" else
+        "Respond in English only, in plain language for a non-clinician reader."
+    )
+    feature_lines = "\n".join(f"- {k}: {v:.3f}" for k, v in feats.items())
+    prompt = f"""You are helping describe the results of a prototype voice-based cognitive
+screening exercise. You are given already-computed numeric speech metrics (extracted with
+signal processing, not by you) and a speech transcript. Write a short, plain-language,
+neutral description (4-6 sentences) of what these numbers show about the speech sample —
+e.g. pace, pausing, vocabulary variety, pitch stability — without stating or implying any
+diagnosis, and without claiming clinical validity. End with a one-sentence reminder that this
+is a non-validated prototype and not a medical assessment. {lang_instruction}
+
+Metrics:
+{feature_lines}
+
+Model's demo classification probability (synthetic, non-clinical model) for "possible concern" group: {proba:.0%}
+
+Transcript of what was said: "{transcript}"
+"""
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model="claude-sonnet-5",
+            max_tokens=500,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response.content[0].text, None
+    except Exception as e:
+        return None, str(e)
+
+
 st.title(T("title"))
+
+_ai_ready = ANTHROPIC_SDK_AVAILABLE and bool(get_anthropic_api_key())
+if _ai_ready:
+    st.caption(
+        "🤖 " + ("การให้คะแนนด้วย AI (Claude) กำลังทำงาน" if LANG == "th" else "AI (Claude) grading is active")
+    )
+else:
+    reason = (
+        ("ไม่พบไลบรารี anthropic" if not ANTHROPIC_SDK_AVAILABLE else "ไม่พบ ANTHROPIC_API_KEY")
+        if LANG == "th" else
+        ("anthropic library not installed" if not ANTHROPIC_SDK_AVAILABLE else "ANTHROPIC_API_KEY not found")
+    )
+    st.caption(
+        f"⚠️ {'ยังไม่ได้เปิดใช้ AI grading (' + reason + ') — ใช้การจับคำสำคัญแบบพื้นฐานแทน ดูวิธีตั้งค่าในข้อ 13' if LANG == 'th' else 'AI grading is OFF (' + reason + ') — using basic keyword matching instead. See setup steps in section 13'}"
+    )
 
 # ─────────────────────────────────────────────
 # 1. WORD MEMORY
@@ -489,11 +661,14 @@ abstraction_qs = [
     (("**โต๊ะกับเก้าอี้เหมือนกันอย่างไร?**", "**How are a Table and a Chair similar?**"), "abs4", C["furniture_kw"]),
 ]
 for (q_th, q_en), key, keywords in abstraction_qs:
-    st.markdown(q_th if LANG == "th" else q_en)
+    q_text = q_th if LANG == "th" else q_en
+    st.markdown(q_text)
     ans = voice_input(T("record_btn"), f"{key}_widget")
     if ans:
         st.success(f"{T('you_said')} **{ans}**")
-        ok = contains_any(ans, keywords)
+        ok, note = ai_grade_answer(q_text, ans)
+        if ok is None:
+            ok = contains_any(ans, keywords)
         if ok:
             st.info(T("abs_correct_prefix"))
         else:
@@ -598,11 +773,14 @@ naming_qs = [
     ("naming_dog_q", "naming_dog", C["dog_kw"]),
 ]
 for label_key, key, keywords in naming_qs:
-    st.markdown(T(label_key))
+    q_text = T(label_key)
+    st.markdown(q_text)
     ans = voice_input(T("record_btn_answer"), key)
     if ans:
         st.success(f"{T('you_said')} **{ans}**")
-        ok = contains_any(ans, keywords)
+        ok, note = ai_grade_answer(q_text, ans)
+        if ok is None:
+            ok = contains_any(ans, keywords)
         st.write(T("correct") if ok else T("incorrect"))
         st.session_state[f"{key}_ok"] = ok
 
@@ -618,11 +796,14 @@ func_qs = [
     ("func_scissors_q", "func_scissors", C["scissors_kw"]),
 ]
 for label_key, key, keywords in func_qs:
-    st.markdown(T(label_key))
+    q_text = T(label_key)
+    st.markdown(q_text)
     ans = voice_input(T("record_btn_answer"), key)
     if ans:
         st.success(f"{T('you_said')} **{ans}**")
-        ok = contains_any(ans, keywords)
+        ok, note = ai_grade_answer(q_text, ans)
+        if ok is None:
+            ok = contains_any(ans, keywords)
         st.write(T("correct") if ok else T("incorrect"))
         st.session_state[f"{key}_ok"] = ok
 
@@ -638,11 +819,14 @@ proverb_qs = [
     ("proverb_slow_q", "proverb_slow", C["proverb_slow_kw"]),
 ]
 for label_key, key, keywords in proverb_qs:
-    st.markdown(T(label_key))
+    q_text = T(label_key)
+    st.markdown(q_text)
     ans = voice_input(T("record_btn_answer"), key)
     if ans:
         st.success(f"{T('you_said')} **{ans}**")
-        ok = contains_any(ans, keywords)
+        ok, note = ai_grade_answer(q_text, ans)
+        if ok is None:
+            ok = contains_any(ans, keywords)
         st.write(T("correct") if ok else T("proverb_try_again"))
         st.session_state[f"{key}_ok"] = ok
 
@@ -716,6 +900,34 @@ else:
             with st.spinner("กำลังสกัดคุณลักษณะเสียงและคำนวณ SHAP…" if LANG == "th" else "Extracting features and computing SHAP…"):
                 feats = extract_acoustic_features(chosen_bytes, chosen_text)
                 if feats is not None:
+                    st.markdown(
+                        "**ตัวชี้วัดหลักของรูปแบบการพูด**" if LANG == "th" else
+                        "**Key Speech Pattern Metrics**"
+                    )
+                    m1, m2, m3, m4 = st.columns(4)
+                    m1.metric(
+                        "อัตราการพูด (คำ/นาที)" if LANG == "th" else "Speaking Rate (wpm)",
+                        f"{feats['speaking_rate']:.0f}"
+                    )
+                    m2.metric(
+                        "ความยาวหยุดพูดเฉลี่ย (วิ)" if LANG == "th" else "Pause Duration (s)",
+                        f"{feats['pause_duration']:.2f}"
+                    )
+                    m3.metric(
+                        "ความถี่การหยุดพูด (ครั้ง/นาที)" if LANG == "th" else "Pause Frequency (/min)",
+                        f"{feats['pause_frequency']:.1f}"
+                    )
+                    m4.metric(
+                        "ความหลากหลายคำศัพท์" if LANG == "th" else "Vocabulary Diversity",
+                        f"{feats['vocabulary_diversity']:.2f}"
+                    )
+                    st.caption(
+                        "คำนวณจากการตรวจจับช่วงเงียบ (silence detection) ในคลื่นเสียงจริง ไม่ได้ใช้ AI ภาษาช่วยวิเคราะห์"
+                        if LANG == "th" else
+                        "Computed directly from silence detection on the raw audio waveform — no language model involved."
+                    )
+                    st.write("---")
+
                     model, X_train = train_demo_model()
                     x_user = pd.DataFrame([feats])[FEATURE_NAMES]
                     proba = model.predict_proba(x_user)[0][1]
@@ -747,6 +959,65 @@ else:
                     )
                     with st.expander("ดูค่าคุณลักษณะดิบ (Raw feature values)"):
                         st.dataframe(pd.DataFrame([feats]).T.rename(columns={0: "value"}))
+
+                    st.write("---")
+                    st.markdown(
+                        "**🤖 ให้ Claude อธิบายผลเป็นภาษาที่เข้าใจง่าย**" if LANG == "th" else
+                        "**🤖 Ask Claude to explain these results in plain language**"
+                    )
+                    st.caption(
+                        "Claude จะอ่านเฉพาะตัวเลขและคำที่ถอดเสียงแล้วเท่านั้น ไม่ได้ฟังไฟล์เสียงโดยตรง "
+                        "ต้องตั้งค่า API key ก่อนใช้งาน (ดูคำแนะนำด้านล่าง)"
+                        if LANG == "th" else
+                        "Claude only reads the computed numbers and transcript below — it does not "
+                        "listen to the raw audio directly. Requires an API key (see setup notes below)."
+                    )
+                    if st.button(
+                        "ขอคำอธิบายจาก Claude" if LANG == "th" else "Get Claude's explanation",
+                        key="ask_claude_btn",
+                    ):
+                        with st.spinner("Claude กำลังวิเคราะห์…" if LANG == "th" else "Claude is analyzing…"):
+                            text, err = get_claude_interpretation(feats, chosen_text, proba)
+                        if err == "sdk_missing":
+                            st.warning(
+                                "ต้องติดตั้งไลบรารีก่อน: `pip install anthropic`"
+                                if LANG == "th" else
+                                "Install the SDK first: `pip install anthropic`"
+                            )
+                        elif err == "no_key":
+                            st.warning(
+                                "ยังไม่พบ ANTHROPIC_API_KEY กรุณาตั้งค่าใน Streamlit Secrets (ดูคำแนะนำด้านล่าง)"
+                                if LANG == "th" else
+                                "No ANTHROPIC_API_KEY found. Set it in Streamlit Secrets (see setup notes below)."
+                            )
+                        elif err:
+                            st.error(f"Claude API error: {err}")
+                        else:
+                            st.info(text)
+
+                    with st.expander(
+                        "⚙️ วิธีตั้งค่า Claude API key" if LANG == "th" else "⚙️ How to set up the Claude API key"
+                    ):
+                        if LANG == "th":
+                            st.markdown("""
+1. สมัครและสร้าง API key ที่ [console.anthropic.com](https://console.anthropic.com) (มีค่าใช้จ่ายตามการใช้งานจริง แต่ราคาต่อครั้งต่ำมาก)
+2. เพิ่ม `anthropic` ในไฟล์ `requirements.txt` ของโปรเจกต์
+3. บน Streamlit Community Cloud: ไปที่การตั้งค่าแอปของคุณ → **Secrets** → เพิ่มบรรทัด:
+   ```
+   ANTHROPIC_API_KEY = "sk-ant-...ของคุณ..."
+   ```
+4. บันทึกแล้วรอแอป redeploy อัตโนมัติ
+""")
+                        else:
+                            st.markdown("""
+1. Sign up and create an API key at [console.anthropic.com](https://console.anthropic.com) (usage-based pricing, but cost per request is very small)
+2. Add `anthropic` to your project's `requirements.txt`
+3. On Streamlit Community Cloud: go to your app's settings → **Secrets** → add:
+   ```
+   ANTHROPIC_API_KEY = "sk-ant-...your key..."
+   ```
+4. Save — the app will redeploy automatically
+""")
 
 st.write("---")
 
