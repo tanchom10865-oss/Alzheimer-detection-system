@@ -5,3 +5,4 @@ SpeechRecognition
    shap
    scikit-learn
    soundfile
+anthropic
