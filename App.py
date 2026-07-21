@@ -310,6 +310,95 @@ def contains_any(text: str, keywords: list) -> bool:
     return False
 
 
+def analyze_pause_ratio(audio_bytes: bytes) -> float:
+    """
+    Lightweight, dependency-free pause estimate — uses only the standard-library
+    `wave` module plus numpy (already a hard dependency of this app). Splits the
+    clip into ~30ms frames, measures RMS energy per frame, and treats frames well
+    below the clip's own peak as silence. Returns the fraction of *mid-speech* time
+    (leading/trailing silence is trimmed off first) that was silent — i.e. how much
+    the person paused between words. This is an approximate heuristic, not a
+    validated clinical measure.
+    """
+    import wave
+
+    path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
+            f.write(audio_bytes)
+            path = f.name
+
+        with wave.open(path, "rb") as wf:
+            n_channels = wf.getnchannels()
+            sampwidth = wf.getsampwidth()
+            framerate = wf.getframerate()
+            n_frames = wf.getnframes()
+            raw = wf.readframes(n_frames)
+
+        if not raw or framerate == 0 or sampwidth <= 0:
+            return 0.0
+
+        dtype_for_width = {1: np.uint8, 2: np.int16, 4: np.int32}
+        dtype = dtype_for_width.get(sampwidth)
+        if dtype is None:
+            return 0.0
+
+        samples = np.frombuffer(raw, dtype=dtype).astype(np.float64)
+        if samples.size == 0:
+            return 0.0
+        if sampwidth == 1:
+            samples -= 128.0  # unsigned 8-bit is offset around 128
+
+        if n_channels > 1:
+            usable = (samples.size // n_channels) * n_channels
+            samples = samples[:usable].reshape(-1, n_channels).mean(axis=1)
+
+        frame_ms = 30
+        frame_len = max(int(framerate * frame_ms / 1000), 1)
+        n_full_frames = samples.size // frame_len
+        if n_full_frames < 2:
+            return 0.0
+
+        frames = samples[:n_full_frames * frame_len].reshape(n_full_frames, frame_len)
+        rms_values = np.sqrt(np.mean(np.square(frames), axis=1))
+
+        peak = float(np.max(rms_values))
+        if peak == 0:
+            return 0.0
+
+        # Frames under 8% of this clip's own peak energy count as silence/pause.
+        threshold = peak * 0.08
+        voiced_mask = rms_values >= threshold
+        voiced_indices = np.nonzero(voiced_mask)[0]
+        if voiced_indices.size == 0:
+            return 0.0
+
+        first_voiced, last_voiced = voiced_indices[0], voiced_indices[-1]
+        if last_voiced <= first_voiced:
+            return 0.0
+
+        inner = rms_values[first_voiced:last_voiced + 1]
+        inner_silent = int(np.sum(inner < threshold))
+        return inner_silent / len(inner) if len(inner) else 0.0
+    except Exception:
+        return 0.0
+    finally:
+        if path:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
+def pacing_factor_from_ratio(pause_ratio: float) -> float:
+    """
+    Converts a mid-speech pause ratio into a scoring multiplier. Little/no pausing
+    stays near 1.0; heavy pausing pulls it down toward 0.5. Capped at 0.5 so a single
+    slow answer can't zero out that question's contribution to the score.
+    """
+    return max(0.5, min(1.0, 1.0 - pause_ratio * 1.2))
+
+
 def voice_input(label: str, key: str):
     audio = st.audio_input(label, key=key)
     if audio is not None:
@@ -321,7 +410,23 @@ def voice_input(label: str, key: str):
             st.session_state[f"{key}_text"] = result if result else ""
             if result is None:
                 st.error(T("transcribe_error"))
-    return st.session_state.get(f"{key}_text", "")
+            pause_ratio = analyze_pause_ratio(audio_bytes)
+            st.session_state[f"{key}_pacing"] = pacing_factor_from_ratio(pause_ratio)
+
+    text_val = st.session_state.get(f"{key}_text", "")
+    if text_val:
+        pacing = st.session_state.get(f"{key}_pacing", 1.0)
+        st.caption(
+            f"⏸️ จังหวะการพูด (Pacing): {pacing:.0%} — ยิ่งหยุดพูดบ่อย/นาน เปอร์เซ็นต์นี้และคะแนนของข้อนี้จะยิ่งลดลง"
+            if LANG == "th" else
+            f"⏸️ Speech pacing: {pacing:.0%} — more/longer pauses lower this and this answer's score contribution."
+        )
+    return text_val
+
+
+def get_pacing(key: str) -> float:
+    """Fetch the stored pacing multiplier for a given voice_input key (defaults to 1.0)."""
+    return st.session_state.get(f"{key}_pacing", 1.0)
 
 
 def get_anthropic_api_key():
@@ -409,7 +514,7 @@ if immediate:
     st.success(f"{T('you_said')} **{immediate}**")
     found_now = [w for w in WORDS if w.lower() in immediate.lower()]
     st.write(f"📊 {len(found_now)} / {len(WORDS)}")
-    st.session_state["immediate_recall_count"] = len(found_now)
+    st.session_state["immediate_recall_count"] = len(found_now) * get_pacing("immediate_recall")
 st.write("---")
 
 # ─────────────────────────────────────────────
@@ -445,7 +550,8 @@ for i, sentence in enumerate([SENTENCE_1, SENTENCE_2, SENTENCE_3, SENTENCE_4], s
     st.markdown(f"{T('sentence_label').format(n=i)} {sentence}")
     ans = voice_input(T("record_btn"), f"lang{i}")
     if ans:
-        sc = similarity_score(ans, sentence)
+        sc_raw = similarity_score(ans, sentence)
+        sc = sc_raw * get_pacing(f"lang{i}")
         st.success(f"{T('you_said')} **{ans}**")
         st.progress(sc, text=f"{T('match_label')}: {sc:.0%}")
         st.session_state[f"lang{i}_score"] = sc
@@ -648,89 +754,11 @@ if recall:
     words_found = [word for word in WORDS if word.lower() in spoken_text]
     score_recall = len(words_found)
     total_words = len(WORDS)
-    pct = score_recall / total_words
+    pacing = get_pacing("recall_widget")
+    pct = (score_recall / total_words) * pacing
     st.progress(pct, text=f"{T('recall_progress')} {pct:.0%}")
     st.write(f"{T('recall_score')} {score_recall} {T('of_words')} {total_words} {T('words_label')}")
-    st.session_state["recall_score_count"] = score_recall
-
-st.write("---")
-
-# ─────────────────────────────────────────────
-# 13. GUIDELINE: COLLECTING A THAI SPEECH DATASET FOR FUTURE RESEARCH
-# ─────────────────────────────────────────────
-st.subheader(
-    "13. แนวทางการเก็บชุดข้อมูลเสียงพูดภาษาไทยสำหรับงานวิจัยในอนาคต"
-    if LANG == "th" else
-    "13. Guideline: Collecting a Thai Speech Dataset for Future Research"
-)
-
-with st.expander(
-    "อ่านแนวทางฉบับเต็ม" if LANG == "th" else "Read the full guideline", expanded=False
-):
-    if LANG == "th":
-        st.markdown("""
-**1. จริยธรรมและความยินยอม**
-- ขอความยินยอมที่เป็นลายลักษณ์อักษร (informed consent) จากผู้เข้าร่วมหรือผู้ดูแลตามกฎหมาย
-- ผ่านการรับรองจากคณะกรรมการจริยธรรมการวิจัยในมนุษย์ (IRB/EC) ของสถาบัน
-- ปฏิบัติตาม พ.ร.บ. คุ้มครองข้อมูลส่วนบุคคล (PDPA) อย่างเคร่งครัด โดยเฉพาะข้อมูลสุขภาพซึ่งจัดเป็นข้อมูลอ่อนไหว
-
-**2. ความหลากหลายของกลุ่มตัวอย่าง**
-- ครอบคลุมช่วงอายุ เพศ ระดับการศึกษา และภูมิภาค (ภาคเหนือ ภาคอีสาน ภาคใต้ ภาคกลาง) เพื่อให้ครอบคลุมสำเนียงถิ่น
-- เก็บทั้งกลุ่มปกติและกลุ่มที่ได้รับการวินิจฉัยแล้ว (เช่น MCI, Alzheimer's) โดยแพทย์ผู้เชี่ยวชาญ เพื่อใช้เป็น ground truth
-- ควบคุมสัดส่วนเพศ/อายุระหว่างกลุ่มให้ใกล้เคียงกัน (matched design) เพื่อลด confounding
-
-**3. โปรโตคอลการบันทึกเสียง**
-- ใช้ไมโครโฟนและอัตราสุ่มสัญญาณเสียง (sampling rate) มาตรฐานเดียวกันทุกจุดเก็บข้อมูล (แนะนำ ≥16kHz, 16-bit)
-- บันทึกในสภาพแวดล้อมที่ควบคุมเสียงรบกวนพื้นหลัง หรืออย่างน้อยบันทึกระดับเสียงรบกวนไว้เป็น metadata
-- ออกแบบชุดงาน (task) ให้หลากหลาย เช่น การอ่านออกเสียง การพูดต่อเนื่องแบบอิสระ (spontaneous speech) การทวนประโยค การนับเลขถอยหลัง และคำอธิบายภาพ เพื่อดึงลักษณะเสียงที่ต่างกัน
-
-**4. การติดป้ายกำกับข้อมูล (Labeling)**
-- เชื่อมโยงกับผลตรวจทางคลินิกมาตรฐาน เช่น MMSE, MoCA, CDR ที่ประเมินโดยแพทย์
-- บันทึกวันที่ประเมิน และระยะเวลาห่างจากการบันทึกเสียง เพื่อความถูกต้องของ label
-- พิจารณาการเก็บข้อมูลระยะยาว (longitudinal) เพื่อดูการเปลี่ยนแปลงของเสียงพูดตามระยะเวลา
-
-**5. การจัดการและความเป็นส่วนตัวของข้อมูล**
-- จัดเก็บไฟล์เสียงและข้อมูลระบุตัวตนแยกจากกัน (de-identification) พร้อมระบบเข้ารหัส
-- กำหนดสิทธิ์การเข้าถึงข้อมูลเฉพาะทีมวิจัยที่เกี่ยวข้อง และมีบันทึกการเข้าถึง (access log)
-- วางแผนระยะเวลาการเก็บรักษาและการทำลายข้อมูลตามนโยบายของสถาบันและกฎหมาย
-
-**6. คุณภาพและ Metadata**
-- บันทึก metadata ครบถ้วน เช่น อุปกรณ์บันทึก อายุ เพศ ระดับการศึกษา สำเนียง โรคประจำตัวที่เกี่ยวข้อง ยาที่ใช้
-- ตรวจสอบคุณภาพเสียง (SNR, clipping) ก่อนนำเข้าสู่ชุดข้อมูลหลัก
-- เตรียมชุดข้อมูลสำหรับ train/validation/test แยกตามผู้พูด (speaker-independent split) เพื่อป้องกัน data leakage
-""")
-    else:
-        st.markdown("""
-**1. Ethics and Consent**
-- Obtain written informed consent from participants (or legal guardians where applicable)
-- Secure approval from an Institutional Review Board / Ethics Committee
-- Comply with Thailand's PDPA (Personal Data Protection Act), treating health data as sensitive data
-
-**2. Sample Diversity**
-- Cover a range of ages, genders, education levels, and regions (North, Northeast, South, Central) to capture dialectal variation
-- Include both cognitively typical participants and clinically diagnosed participants (e.g., MCI, Alzheimer's) confirmed by specialists, to serve as ground truth
-- Match age/gender distribution across groups where possible to reduce confounding
-
-**3. Recording Protocol**
-- Use a consistent microphone setup and sampling rate across all collection sites (recommend ≥16kHz, 16-bit)
-- Record in an environment with controlled background noise, or log ambient noise level as metadata
-- Design varied elicitation tasks: reading aloud, spontaneous speech, sentence repetition, backward counting, and picture description, to capture different acoustic characteristics
-
-**4. Labeling**
-- Link each recording to standardized clinical assessments (MMSE, MoCA, CDR) scored by a clinician
-- Record the assessment date and its gap from the recording date for label accuracy
-- Consider longitudinal collection to track how speech changes over time
-
-**5. Data Management and Privacy**
-- Store audio separately from identifying information (de-identification), with encryption
-- Restrict access to the research team only, with an access log
-- Define a retention and deletion policy in line with institutional and legal requirements
-
-**6. Quality and Metadata**
-- Record complete metadata: recording device, age, gender, education, dialect/accent, relevant conditions, medications
-- Check audio quality (SNR, clipping) before inclusion in the main dataset
-- Use a speaker-independent train/validation/test split to prevent data leakage
-""")
+    st.session_state["recall_score_count"] = score_recall * pacing
 
 st.write("---")
 
@@ -738,105 +766,94 @@ st.write("---")
 # SCORING
 # ─────────────────────────────────────────────
 if st.button(T("calc_score_btn")):
-    score = 0
+    score = 0.0
     details = []
+    pacing_note = (
+        "⏸️ = ปรับลดตามจังหวะการพูด (พูดหยุดมาก คะแนนข้อนี้จะลดลง)"
+        if LANG == "th" else
+        "⏸️ = adjusted for pausing (more pauses lower this question's points)"
+    )
 
-    imm = st.session_state.get("immediate_recall_count", 0)
+    imm = st.session_state.get("immediate_recall_count", 0.0)
     score += imm
-    details.append(f"🧠 {T('sec1b_header')}: {imm}/{len(WORDS)}")
+    details.append(f"🧠 {T('sec1b_header')}: {imm:.1f}/{len(WORDS)} ⏸️")
 
-    if st.session_state.get("fwd_ok"):
-        score += 1
-        details.append(f"✅ {T('fwd_label')}")
-    else:
-        details.append(f"❌ {T('fwd_label')}")
+    fwd_pt = get_pacing("fwd") if st.session_state.get("fwd_ok") else 0.0
+    score += fwd_pt
+    details.append(f"{'✅' if fwd_pt > 0 else '❌'} {T('fwd_label')} ⏸️ ({fwd_pt:.2f} pt)")
 
-    if st.session_state.get("bwd_ok"):
-        score += 1
-        details.append(f"✅ {T('bwd_label')}")
-    else:
-        details.append(f"❌ {T('bwd_label')}")
+    bwd_pt = get_pacing("bwd") if st.session_state.get("bwd_ok") else 0.0
+    score += bwd_pt
+    details.append(f"{'✅' if bwd_pt > 0 else '❌'} {T('bwd_label')} ⏸️ ({bwd_pt:.2f} pt)")
 
     for i in range(1, 5):
-        s = st.session_state.get(f"lang{i}_score", 0.0)
+        s = st.session_state.get(f"lang{i}_score", 0.0)  # already pacing-adjusted
         label = T("sentence_label").format(n=i)
         if s >= 0.6:
             score += 1
-            details.append(f"✅ {label} {s:.0%}")
+            details.append(f"✅ {label} {s:.0%} ⏸️")
         else:
-            details.append(f"❌ {label} {s:.0%}")
+            details.append(f"❌ {label} {s:.0%} ⏸️")
 
     for i in range(1, 5):
-        if st.session_state.get(f"abs{i}_correct"):
-            score += 1
-            details.append(f"✅ {T('sec4_header')} #{i}")
-        else:
-            details.append(f"❌ {T('sec4_header')} #{i}")
+        abs_key = f"abs{i}_widget"
+        pt = get_pacing(abs_key) if st.session_state.get(f"abs{i}_correct") else 0.0
+        score += pt
+        details.append(f"{'✅' if pt > 0 else '❌'} {T('sec4_header')} #{i} ⏸️ ({pt:.2f} pt)")
 
-    ori_time_keys = ["ori_day_name_ok", "ori_date_ok", "ori_month_ok", "ori_year_ok", "ori_season_ok"]
+    ori_time_keys = ["ori_day_name", "ori_date", "ori_month", "ori_year", "ori_season"]
     for key in ori_time_keys:
-        if st.session_state.get(key):
-            score += 1
-            details.append(f"✅ {T('sec5_header')} ({key})")
-        else:
-            details.append(f"❌ {T('sec5_header')} ({key})")
+        pt = get_pacing(key) if st.session_state.get(f"{key}_ok") else 0.0
+        score += pt
+        details.append(f"{'✅' if pt > 0 else '❌'} {T('sec5_header')} ({key}) ⏸️ ({pt:.2f} pt)")
 
-    place_keys = ["ori_country_answered", "ori_province_answered", "ori_place_answered",
-                  "ori_floor_answered", "ori_city_answered"]
+    place_keys = ["ori_country", "ori_province", "ori_place", "ori_floor", "ori_city"]
     for key in place_keys:
-        if st.session_state.get(key):
-            score += 1
-            details.append(f"✅ {T('sec6_header')} ({key})")
-        else:
-            details.append(f"❌ {T('sec6_header')} ({key})")
+        pt = get_pacing(key) if st.session_state.get(f"{key}_answered") else 0.0
+        score += pt
+        details.append(f"{'✅' if pt > 0 else '❌'} {T('sec6_header')} ({key}) ⏸️ ({pt:.2f} pt)")
 
-    for key in ["fluency_animals_count", "fluency_fruits_count"]:
-        count = st.session_state.get(key, 0)
-        if count >= 8:
-            score += 1
-            details.append(f"✅ {T('sec7_header')} ({key}): {count}")
-        else:
-            details.append(f"❌ {T('sec7_header')} ({key}): {count}")
+    for key in ["fluency_animals", "fluency_fruits"]:
+        count = st.session_state.get(f"{key}_count", 0)
+        pt = get_pacing(key) if count >= 8 else 0.0
+        score += pt
+        details.append(f"{'✅' if pt > 0 else '❌'} {T('sec7_header')} ({key}): {count} ⏸️ ({pt:.2f} pt)")
 
-    calc_correct = st.session_state.get("calc_correct_count", 0)
-    score += calc_correct
-    details.append(f"🧮 {T('sec8_header')}: {calc_correct}/5")
+    calc_raw = st.session_state.get("calc_correct_count", 0)
+    calc_pt = calc_raw * get_pacing("calc_serial7")
+    score += calc_pt
+    details.append(f"🧮 {T('sec8_header')}: {calc_raw}/5 ⏸️ ({calc_pt:.2f} pt)")
 
-    for key in ["naming_watch_ok", "naming_pen_ok", "naming_dog_ok"]:
-        if st.session_state.get(key):
-            score += 1
-            details.append(f"✅ {T('sec9_header')} ({key})")
-        else:
-            details.append(f"❌ {T('sec9_header')} ({key})")
+    for key in ["naming_watch", "naming_pen", "naming_dog"]:
+        pt = get_pacing(key) if st.session_state.get(f"{key}_ok") else 0.0
+        score += pt
+        details.append(f"{'✅' if pt > 0 else '❌'} {T('sec9_header')} ({key}) ⏸️ ({pt:.2f} pt)")
 
-    for key in ["func_hammer_ok", "func_scissors_ok"]:
-        if st.session_state.get(key):
-            score += 1
-            details.append(f"✅ {T('sec10_header')} ({key})")
-        else:
-            details.append(f"❌ {T('sec10_header')} ({key})")
+    for key in ["func_hammer", "func_scissors"]:
+        pt = get_pacing(key) if st.session_state.get(f"{key}_ok") else 0.0
+        score += pt
+        details.append(f"{'✅' if pt > 0 else '❌'} {T('sec10_header')} ({key}) ⏸️ ({pt:.2f} pt)")
 
-    for key in ["proverb_water_ok", "proverb_slow_ok"]:
-        if st.session_state.get(key):
-            score += 1
-            details.append(f"✅ {T('sec11_header')} ({key})")
-        else:
-            details.append(f"❌ {T('sec11_header')} ({key})")
+    for key in ["proverb_water", "proverb_slow"]:
+        pt = get_pacing(key) if st.session_state.get(f"{key}_ok") else 0.0
+        score += pt
+        details.append(f"{'✅' if pt > 0 else '❌'} {T('sec11_header')} ({key}) ⏸️ ({pt:.2f} pt)")
 
-    found = st.session_state.get("recall_score_count", 0)
+    found = st.session_state.get("recall_score_count", 0.0)  # already pacing-adjusted
     score += found
-    details.append(f"🧠 {T('sec12_header')}: {found}/{len(WORDS)}")
+    details.append(f"🧠 {T('sec12_header')}: {found:.1f}/{len(WORDS)} ⏸️")
 
     st.subheader(T("results_header"))
+    st.caption(pacing_note)
     for d in details:
         st.write(d)
 
     max_score = len(WORDS) + 2 + 4 + 4 + 5 + 5 + 2 + 5 + 3 + 2 + 2 + len(WORDS)
-    st.write(f"{T('total_score')} {score} / {max_score}**")
+    st.write(f"{T('total_score')} {score:.1f} / {max_score}**")
 
-    if score >= int(max_score * 0.7):
+    if score >= max_score * 0.7:
         st.success(T("good"))
-    elif score >= int(max_score * 0.4):
+    elif score >= max_score * 0.4:
         st.warning(T("mild"))
     else:
         st.error(T("review"))
