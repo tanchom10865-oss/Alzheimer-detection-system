@@ -58,6 +58,21 @@ STR = {
     "title": ("🧠 แบบทดสอบคัดกรองสภาวะทางปัญญา (Cognitive Screening Test)",
               "🧠 Cognitive Screening Test"),
 
+    "mic_instructions": (
+        "🎙 **วิธีใช้ไมโครโฟน:**\n"
+        "1. กดไอคอนไมโครโฟนเพื่อเริ่มบันทึกเสียง\n"
+        "2. พูดคำตอบของคุณให้ชัดเจน\n"
+        "3. กดไอคอนอีกครั้งเพื่อหยุดบันทึก\n"
+        "4. รอสักครู่ให้ระบบประมวลผลเสียงของคุณ\n\n"
+        "หากไม่มีอะไรเกิดขึ้น ให้ตรวจสอบว่าเบราว์เซอร์อนุญาตให้ใช้ไมโครโฟนแล้ว",
+        "🎙 **How to use the microphone:**\n"
+        "1. Click the microphone icon to start recording.\n"
+        "2. Speak your answer clearly.\n"
+        "3. Click the microphone icon again to stop.\n"
+        "4. Wait a few seconds while it processes your answer.\n\n"
+        "If nothing happens, make sure you've allowed microphone access in your browser."
+    ),
+
     "record_btn": ("🎙 บันทึกเสียง", "🎙 Record your answer"),
     "record_btn_answer": ("🎙 บันทึกคำตอบ", "🎙 Record your answer"),
     "transcribing": ("กำลังแปลงเสียงเป็นข้อความ…", "Transcribing…"),
@@ -479,6 +494,7 @@ Reply with exactly one word first — YES or NO — then a very short reason (un
 
 
 st.title(T("title"))
+st.info(T("mic_instructions"))
 
 _ai_ready = ANTHROPIC_SDK_AVAILABLE and bool(get_anthropic_api_key())
 if _ai_ready:
